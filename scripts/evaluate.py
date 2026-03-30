@@ -184,8 +184,8 @@ def main():
         disc_cfg = config.get("discovery", {})
         discovery = SpanCentricDiscovery(
             n_layers=L,
-            tau_discovery=disc_cfg.get("tau_discovery", 0.5),
             min_cluster_fraction=disc_cfg.get("min_cluster_fraction", 0.01),
+            max_cluster_fraction=disc_cfg.get("max_cluster_fraction", 0.40),
             min_cluster_size=disc_cfg.get("hdbscan_min_cluster_size", 5),
         )
 

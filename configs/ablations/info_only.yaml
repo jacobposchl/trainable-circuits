@@ -27,7 +27,7 @@ training:
   lr: 1.0e-3
   weight_decay: 1.0e-4
   geometry_temperature: 0.1
-  info_loss_weight: 1.0
+  info_loss_weight: 5.0
   lambda_geometry:
     init: 0.0
     final: 0.0           # geometry loss disabled
@@ -40,8 +40,8 @@ data:
   augment: true
 
 discovery:
-  tau_discovery: 0.5
   min_cluster_fraction: 0.01
+  max_cluster_fraction: 0.40
   hdbscan_min_cluster_size: 5
 
 logging:

@@ -2,19 +2,25 @@
 Fidelity loss L_info: trains per-layer z-representations to encode the flow
 co-activation structure of each backbone block.
 
-L_info = (1/L) * sum_l || MLP_l(z_l^a * z_l^b) - (f_l^a ⊙ f_l^b) ||^2
+L_info = (1/L) * sum_l  SS_res_l / SS_tot_l
+       ≈ (1/L) * sum_l  (1 - R²_l)
+
+where for layer l:
+  SS_res_l = || MLP_l(z_l^a * z_l^b) - (f_l^a ⊙ f_l^b) ||²_F  (sum over pairs & dims)
+  SS_tot_l = || f_l^a ⊙ f_l^b  - mean(f_l^a ⊙ f_l^b) ||²_F
+
+This normalized formulation is scale-invariant: it equals ~1.0 at initialization
+(predictor ≈ constant mean) and → 0 at perfect reconstruction, regardless of the
+absolute magnitude of the flow co-activation targets.  This keeps L_info on the
+same order as L_geometry (~5.5) so both losses contribute meaningfully to gradients.
 
 The target f_l^a ⊙ f_l^b is the element-wise product of the two compressed,
 L2-normalized flow vectors at layer l.  f_l(x) is derived from the non-skip
 branch output F_l(x) = bn2(x) (pre-residual addition), compressed via
 AdaptiveMaxPool2d + Flatten + a fixed linear projection to D_flow dimensions.
-This isolates each block's contribution from the accumulated residual history,
-making it the correct signal for circuit detection.
 
 With the flow compression, all layers share the same D_flow output dimension,
 so layer_dims = [D_flow] * L and the regressor architecture is uniform.
-The element-wise product z_l^a * z_l^b is symmetric, matching the symmetry
-of the co-activation target f_l^a ⊙ f_l^b.
 """
 from __future__ import annotations
 
@@ -72,14 +78,19 @@ class InfoLoss(nn.Module):
                           co-activation vectors (f_l^a ⊙ f_l^b)
 
         Returns:
-            Scalar loss (mean MSE over layers).
+            Scalar loss ≈ mean(1 - R²) over layers.  Scale-invariant: ~1.0 at
+            init, → 0 at perfect reconstruction.
         """
         L = len(z_list_a)
         total_loss = 0.0
 
         for l in range(L):
-            z_product = z_list_a[l] * z_list_b[l]          # [N_pairs, d]
-            predicted = self.regressors[l](z_product)       # [N_pairs, D_l]
-            total_loss = total_loss + torch.mean((predicted - rich_targets[l]) ** 2)
+            z_product = z_list_a[l] * z_list_b[l]              # [N_pairs, d]
+            predicted = self.regressors[l](z_product)           # [N_pairs, D_l]
+            true      = rich_targets[l]                         # [N_pairs, D_l]
+
+            ss_res = ((predicted - true) ** 2).sum()
+            ss_tot = ((true - true.mean()) ** 2).sum().clamp(min=1e-8)
+            total_loss = total_loss + ss_res / ss_tot
 
         return total_loss / L

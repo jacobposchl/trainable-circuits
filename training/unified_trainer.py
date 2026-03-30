@@ -155,7 +155,7 @@ class Phase1Trainer:
             print(
                 f"Epoch {epoch+1:3d}/{epochs} | "
                 f"loss={train_metrics['loss']:.4f} "
-                f"info={train_metrics['info_loss']:.4f} "
+                f"info={train_metrics['info_loss']:.2e} "
                 f"geom={train_metrics['geometry_loss']:.4f} | "
                 f"val_R2={val_metrics['r2']:.3f} "
                 f"val_rho={val_metrics['mean_rho']:.3f} | "
@@ -235,7 +235,7 @@ class Phase1Trainer:
                 print(
                     f"  [{batch_idx+1}/{len(self.train_loader)}] "
                     f"loss={loss.item():.4f} "
-                    f"info={info_loss.item():.4f} "
+                    f"info={info_loss.item():.2e} "
                     f"geom={geometry_loss.item():.4f}"
                 )
 

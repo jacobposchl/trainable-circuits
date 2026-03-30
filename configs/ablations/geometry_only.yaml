@@ -40,8 +40,8 @@ data:
   augment: true
 
 discovery:
-  tau_discovery: 0.5
   min_cluster_fraction: 0.01
+  max_cluster_fraction: 0.40
   hdbscan_min_cluster_size: 5
 
 logging:

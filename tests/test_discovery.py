@@ -47,40 +47,6 @@ class TestSpanEnumeration:
 
 
 # --------------------------------------------------------------------------- #
-# Within-Span Sharpening
-# --------------------------------------------------------------------------- #
-
-class TestWithinSpanSharpening:
-    def test_output_sums_to_one(self):
-        disc = SpanCentricDiscovery(n_layers=8, tau_discovery=0.5)
-        subvec = np.random.rand(10, 5)
-        sharpened = disc.sharpen_within_span(subvec)
-        row_sums = sharpened.sum(axis=1)
-        np.testing.assert_allclose(row_sums, 1.0, atol=1e-6)
-
-    def test_low_temperature_concentrates(self):
-        disc = SpanCentricDiscovery(n_layers=8, tau_discovery=0.01)
-        subvec = np.array([[0.1, 0.5, 0.9, 0.2, 0.3]])
-        sharpened = disc.sharpen_within_span(subvec)
-        # Should concentrate on index 2 (highest value)
-        assert sharpened[0, 2] > 0.9
-
-    def test_high_temperature_is_uniform(self):
-        disc = SpanCentricDiscovery(n_layers=8, tau_discovery=100.0)
-        subvec = np.array([[0.1, 0.5, 0.9, 0.2, 0.3]])
-        sharpened = disc.sharpen_within_span(subvec)
-        # Should be nearly uniform
-        expected = np.ones(5) / 5
-        np.testing.assert_allclose(sharpened[0], expected, atol=0.05)
-
-    def test_shape_preserved(self):
-        disc = SpanCentricDiscovery(n_layers=8)
-        subvec = np.random.rand(20, 3)
-        sharpened = disc.sharpen_within_span(subvec)
-        assert sharpened.shape == (20, 3)
-
-
-# --------------------------------------------------------------------------- #
 # Extract Span Sub-Vector
 # --------------------------------------------------------------------------- #
 
@@ -116,11 +82,31 @@ class TestCanonicalityFilter:
         assert 0 in canonical
         assert 1 not in canonical  # 5/100 = 0.05 < 0.1
 
+    def test_filters_large_clusters(self):
+        disc = SpanCentricDiscovery(
+            n_layers=8, min_cluster_fraction=0.01, max_cluster_fraction=0.30
+        )
+        # 100 pairs: cluster 0 has 40 (too large), cluster 1 has 20 (ok)
+        labels = np.array([0]*40 + [1]*20 + [-1]*40)
+        canonical = disc.filter_canonical(labels, n_total_pairs=100)
+        assert 0 not in canonical  # 40/100 = 0.40 > 0.30
+        assert 1 in canonical      # 20/100 = 0.20, within window
+
     def test_noise_excluded(self):
         disc = SpanCentricDiscovery(n_layers=8)
         labels = np.array([-1]*100)
         canonical = disc.filter_canonical(labels, n_total_pairs=100)
         assert len(canonical) == 0
+
+    def test_boundary_inclusive(self):
+        disc = SpanCentricDiscovery(
+            n_layers=8, min_cluster_fraction=0.10, max_cluster_fraction=0.40
+        )
+        # cluster 0 exactly at min boundary, cluster 1 exactly at max boundary
+        labels = np.array([0]*10 + [1]*40 + [-1]*50)
+        canonical = disc.filter_canonical(labels, n_total_pairs=100)
+        assert 0 in canonical   # 10/100 = 0.10 == min_threshold
+        assert 1 in canonical   # 40/100 = 0.40 == max_threshold
 
 
 # --------------------------------------------------------------------------- #

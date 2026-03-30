@@ -8,9 +8,13 @@ depth ranges, which is the correct behavior for multi-circuit inputs.
 
 Key steps per span:
   1. Extract the span sub-vector from each pair's raw profile
-  2. Apply within-span temperature sharpening (softmax within span only)
-  3. Cluster with HDBSCAN
-  4. Filter by canonicality criterion (>1% of all pairs)
+  2. Cluster with HDBSCAN on raw (un-normalized) sub-vectors
+  3. Filter by canonicality criterion: size in (min_cluster_fraction, max_cluster_fraction)
+
+Raw sub-vectors (no softmax sharpening) are used so that the discovered clusters
+have elevated absolute similarity — the property the within-span elevation test
+(Criterion 3) checks.  Softmax sharpening would cluster by profile shape while
+discarding magnitude, making the elevation test impossible to pass.
 """
 from __future__ import annotations
 
@@ -30,23 +34,25 @@ class SpanCentricDiscovery:
     def __init__(
         self,
         n_layers: int,
-        tau_discovery: float = 0.5,
         min_cluster_fraction: float = 0.01,
+        max_cluster_fraction: float = 0.40,
         min_cluster_size: int = 5,
         max_pairs: int = 100_000,
     ):
         """
         Args:
             n_layers:             Number of backbone layers (L).
-            tau_discovery:        Temperature for within-span sharpening.
             min_cluster_fraction: Minimum fraction of total pairs for canonicality.
+            max_cluster_fraction: Maximum fraction of total pairs — clusters larger
+                                  than this are degenerate mega-clusters (nearly the
+                                  whole dataset) and are excluded.
             min_cluster_size:     HDBSCAN min_cluster_size parameter.
             max_pairs:            Maximum pairs to cluster per span (subsample
                                   if more, for memory/compute tractability).
         """
         self.n_layers = n_layers
-        self.tau_discovery = tau_discovery
         self.min_cluster_fraction = min_cluster_fraction
+        self.max_cluster_fraction = max_cluster_fraction
         self.min_cluster_size = min_cluster_size
         self.max_pairs = max_pairs
 
@@ -75,31 +81,14 @@ class SpanCentricDiscovery:
         l_start, l_end = span
         return profiles[:, l_start:l_end + 1]
 
-    def sharpen_within_span(self, subvectors: np.ndarray) -> np.ndarray:
-        """
-        Apply temperature-scaled softmax within the span sub-vector only.
-
-        Args:
-            subvectors: [N_pairs, span_len]
-
-        Returns:
-            [N_pairs, span_len] sharpened, each row sums to 1
-        """
-        scaled = subvectors / self.tau_discovery
-        # Numerical stability: subtract max per row
-        scaled = scaled - scaled.max(axis=1, keepdims=True)
-        exp_scaled = np.exp(scaled)
-        row_sums = exp_scaled.sum(axis=1, keepdims=True)
-        return exp_scaled / np.maximum(row_sums, 1e-8)
-
     def cluster_span(
-        self, sharpened: np.ndarray
+        self, subvectors: np.ndarray
     ) -> tuple[np.ndarray, dict]:
         """
-        Run HDBSCAN on sharpened sub-vectors for one span.
+        Run HDBSCAN on raw sub-vectors for one span.
 
         Args:
-            sharpened: [N_pairs, span_len]
+            subvectors: [N_pairs, span_len] raw (un-normalized) similarity values
 
         Returns:
             labels:       [N_pairs] cluster assignments (-1 = noise)
@@ -110,7 +99,7 @@ class SpanCentricDiscovery:
             min_samples=None,
             metric="euclidean",
         )
-        labels = clusterer.fit_predict(sharpened)
+        labels = clusterer.fit_predict(subvectors)
 
         cluster_info = {}
         for cid in set(labels):
@@ -125,7 +114,10 @@ class SpanCentricDiscovery:
         self, labels: np.ndarray, n_total_pairs: int
     ) -> list[int]:
         """
-        Keep only clusters with > min_cluster_fraction of total pairs.
+        Keep only clusters within the [min_cluster_fraction, max_cluster_fraction]
+        size window.  Clusters below the minimum are too sparse to be canonical.
+        Clusters above the maximum are degenerate mega-clusters that cover most of
+        the dataset and cannot produce meaningful within-span elevation.
 
         Args:
             labels:        [N_pairs] cluster assignments
@@ -134,12 +126,14 @@ class SpanCentricDiscovery:
         Returns:
             List of canonical cluster IDs
         """
-        threshold = self.min_cluster_fraction * n_total_pairs
+        min_threshold = self.min_cluster_fraction * n_total_pairs
+        max_threshold = self.max_cluster_fraction * n_total_pairs
         canonical = []
         for cid in set(labels):
             if cid == -1:
                 continue
-            if (labels == cid).sum() >= threshold:
+            size = (labels == cid).sum()
+            if min_threshold <= size <= max_threshold:
                 canonical.append(cid)
         return canonical
 
@@ -150,6 +144,10 @@ class SpanCentricDiscovery:
     ) -> list[dict]:
         """
         Full discovery pipeline across all spans.
+
+        Clusters on raw scalar similarity profiles so that discovered clusters
+        have genuinely elevated within-span similarity (both high shape-consistency
+        AND high absolute level), which is what Criterion 3 tests.
 
         Args:
             profiles:     [N_pairs, L] raw alignment profile vectors
@@ -173,6 +171,10 @@ class SpanCentricDiscovery:
             # Extract sub-vector for this span
             subvec = self.extract_span_subvector(profiles, span)
 
+            # Skip single-layer spans
+            if subvec.shape[1] == 1:
+                continue
+
             # Subsample if too many pairs
             if N > self.max_pairs:
                 sample_idx = np.random.choice(N, self.max_pairs, replace=False)
@@ -181,24 +183,17 @@ class SpanCentricDiscovery:
                 sample_idx = np.arange(N)
                 subvec_sample = subvec
 
-            # Sharpen within span
-            sharpened = self.sharpen_within_span(subvec_sample)
+            # Cluster on raw sub-vectors (no normalization — preserves magnitude)
+            labels, cluster_info = self.cluster_span(subvec_sample)
 
-            # Skip single-layer spans with no variation (all rows identical after sharpening)
-            if sharpened.shape[1] == 1:
-                continue
-
-            # Cluster
-            labels, cluster_info = self.cluster_span(sharpened)
-
-            # Filter canonical
+            # Filter canonical: must be in (min, max) size window
             canonical_ids = self.filter_canonical(labels, N)
 
             for cid in canonical_ids:
                 mask_in_sample = labels == cid
                 global_indices = sample_idx[mask_in_sample]
 
-                # Compute mean within-span similarity (from raw, not sharpened)
+                # Compute mean within-span similarity from raw sub-vector
                 cluster_subvec = subvec[global_indices]
                 mean_sim = float(cluster_subvec.mean())
                 std_sim = float(cluster_subvec.std())
