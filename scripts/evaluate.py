@@ -190,10 +190,11 @@ def main():
         )
 
         print("\n--- Circuit Discovery ---")
-        profiles_flat = true_sims.numpy()
         pair_indices = np.stack([idx_a.numpy(), idx_b.numpy()], axis=1)
 
-        circuits = discovery.discover_all(profiles_flat, pair_indices)
+        # Discovery runs on z-space similarity profiles — the representation
+        # trained to organise pairs by circuit co-activation structure.
+        circuits = discovery.discover_all(z_sims, pair_indices)
         print(f"  Found {len(circuits)} canonical circuits")
 
         for i, c in enumerate(circuits):
@@ -219,7 +220,7 @@ def main():
                   f"({'PASS' if pur_result['passes'] else 'FAIL'})")
 
         # Multi-circuit membership
-        membership = discovery.multi_circuit_membership(circuits, n_pairs=profiles_flat.shape[0])
+        membership = discovery.multi_circuit_membership(circuits, n_pairs=z_sims.shape[0])
         print(f"\n  Multi-circuit membership: "
               f"mean={membership.mean():.1f}, max={membership.max()}")
 
