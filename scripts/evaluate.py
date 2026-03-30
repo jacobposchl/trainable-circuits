@@ -184,7 +184,6 @@ def main():
         disc_cfg = config.get("discovery", {})
         discovery = SpanCentricDiscovery(
             n_layers=L,
-            projection_dim=config["model"]["meta_encoder"].get("projection_dim", 128),
             umap_n_components=disc_cfg.get("umap_n_components", 15),
             umap_n_neighbors=disc_cfg.get("umap_n_neighbors", 15),
             min_cluster_fraction=disc_cfg.get("min_cluster_fraction", 0.01),

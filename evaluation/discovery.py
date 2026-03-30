@@ -31,7 +31,6 @@ class SpanCentricDiscovery:
     def __init__(
         self,
         n_layers: int,
-        projection_dim: int,
         umap_n_components: int = 15,
         umap_n_neighbors: int = 15,
         min_cluster_fraction: float = 0.01,
@@ -41,8 +40,6 @@ class SpanCentricDiscovery:
         """
         Args:
             n_layers:             Number of backbone layers (L).
-            projection_dim:       Dimension d of each z-vector (= projection_dim
-                                  from MetaEncoder).  Used to construct span features.
             umap_n_components:    Target dimensionality for UMAP reduction.
             umap_n_neighbors:     n_neighbors parameter for UMAP.
             min_cluster_fraction: Minimum fraction of total images for canonicality.
@@ -51,7 +48,6 @@ class SpanCentricDiscovery:
             min_cluster_size:     HDBSCAN min_cluster_size parameter.
         """
         self.n_layers = n_layers
-        self.projection_dim = projection_dim
         self.umap_n_components = umap_n_components
         self.umap_n_neighbors = umap_n_neighbors
         self.min_cluster_fraction = min_cluster_fraction

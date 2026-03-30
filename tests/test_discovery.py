@@ -28,7 +28,7 @@ def make_z_list(N=N, L=L, d=D):
 
 
 def make_discovery(**kwargs):
-    defaults = dict(n_layers=L, projection_dim=D)
+    defaults = dict(n_layers=L)
     defaults.update(kwargs)
     return SpanCentricDiscovery(**defaults)
 
@@ -44,7 +44,7 @@ class TestSpanEnumeration:
         assert len(spans) == 36  # L(L+1)/2
 
     def test_count_for_4_layers(self):
-        disc = SpanCentricDiscovery(n_layers=4, projection_dim=D)
+        disc = SpanCentricDiscovery(n_layers=4)
         spans = disc.enumerate_spans()
         assert len(spans) == 10  # 4*5/2
 
