@@ -23,12 +23,7 @@ training:
   epochs: 100
   lr: 1.0e-3
   weight_decay: 1.0e-4
-  geometry_temperature: 0.1   # tau for L_geometry
-  info_loss_weight: 5.0       # weight for L_info (set to 0 for geometry-only ablation)
-  lambda_geometry:
-    init: 0.0
-    final: 1.0
-    warmup_epochs: 30
+  info_loss_weight: 5.0
 
 data:
   data_dir: data/cifar10
@@ -37,6 +32,8 @@ data:
   augment: true
 
 discovery:
+  umap_n_components: 15
+  umap_n_neighbors: 15
   min_cluster_fraction: 0.01
   max_cluster_fraction: 0.40
   hdbscan_min_cluster_size: 5

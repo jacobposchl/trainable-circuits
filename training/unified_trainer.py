@@ -4,15 +4,14 @@ Phase 1 Trainer: Meta-Encoder Validation.
 Trains a meta-encoder to learn circuit-space representations from a frozen
 backbone's activation trajectories. The backbone is never modified.
 
-    L_total = L_info + lambda * L_geometry
+    L_total = L_info
 
 where:
-  L_info:     Flow co-activation reconstruction fidelity.
-              MLP_l(z_l^a * z_l^b)  vs  f_l^a ⊙ f_l^b
-              f_l(x) = compressed, L2-normalised bn2/bn3 output (pre-skip),
-              isolating the pure block contribution from accumulated history.
-  L_geometry: Soft contrastive geometry (flow-similarity-weighted cross-entropy
-              in z-space).  Scalar targets are cosine similarities of f_l vectors.
+  L_info:  Flow co-activation reconstruction fidelity, normalized as (1 - R²):
+           SS_res_l / SS_tot_l  where SS_res = ||MLP_l(z_l^a * z_l^b) - f_l^a ⊙ f_l^b||²_F
+           Scale-invariant: ~1.0 at init, → 0 at perfect reconstruction.
+           f_l(x) = compressed, L2-normalised bn2/bn3 output (pre-skip),
+           isolating the pure block contribution from accumulated history.
 
 All pairs are formed within-batch.  No class-label pairing needed — the
 training signal comes entirely from flow co-activation profiles.
@@ -31,9 +30,7 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from models.backbone import FrozenBackbone
 from models.meta_encoder import MetaEncoder
 from losses.info_loss import InfoLoss
-from losses.geometry_loss import GeometryLoss
 from data.cifar import get_standard_loaders
-from training.schedulers import LambdaScheduler
 
 
 class Phase1Trainer:
@@ -45,7 +42,6 @@ class Phase1Trainer:
         self._build_data()
         self._build_losses()      # must come before _build_optimizers
         self._build_optimizers()
-        self._build_schedulers()
 
         self.checkpoint_dir = Path(config["logging"]["checkpoint_dir"])
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +95,7 @@ class Phase1Trainer:
         )
         self.lr_scheduler = CosineAnnealingLR(
             self.optimizer,
-            T_max=tcfg["epochs"],
+            T_max=self.cfg["training"]["epochs"],
             eta_min=lr * 0.01,
         )
 
@@ -115,20 +111,7 @@ class Phase1Trainer:
             hidden_dim=rcfg.get("hidden_dim", 64),
         ).to(self.device)
 
-        self.geometry_loss = GeometryLoss(
-            temperature=float(tcfg.get("geometry_temperature", 0.1))
-        )
-        self.info_loss_weight = float(tcfg.get("info_loss_weight", 1.0))
-
-    def _build_schedulers(self):
-        tcfg = self.cfg["training"]
-        lcfg = tcfg.get("lambda_geometry", {})
-        self.lambda_scheduler = LambdaScheduler(
-            init_val=lcfg.get("init", 0.0),
-            final_val=lcfg.get("final", 1.0),
-            warmup_epochs=lcfg.get("warmup_epochs", 10),
-        )
-        self.lambda_val = self.lambda_scheduler.get(0)
+        self.info_loss_weight = float(tcfg.get("info_loss_weight", 5.0))
 
     # ------------------------------------------------------------------ #
     # Training loop
@@ -146,8 +129,6 @@ class Phase1Trainer:
         save_every   = self.cfg["logging"].get("save_every", 10)
 
         for epoch in range(start_epoch, epochs):
-            self.lambda_val = self.lambda_scheduler.get(epoch)
-
             train_metrics = self._train_epoch(epoch, log_interval)
             val_metrics   = self._val_epoch()
             self.lr_scheduler.step()
@@ -155,11 +136,9 @@ class Phase1Trainer:
             print(
                 f"Epoch {epoch+1:3d}/{epochs} | "
                 f"loss={train_metrics['loss']:.4f} "
-                f"info={train_metrics['info_loss']:.2e} "
-                f"geom={train_metrics['geometry_loss']:.4f} | "
+                f"info={train_metrics['info_loss']:.2e} | "
                 f"val_R2={val_metrics['r2']:.3f} "
-                f"val_rho={val_metrics['mean_rho']:.3f} | "
-                f"lambda={self.lambda_val:.3f}"
+                f"val_rho={val_metrics['mean_rho']:.3f}"
             )
 
             is_best = val_metrics["r2"] > best_val_r2
@@ -176,7 +155,6 @@ class Phase1Trainer:
 
         total_loss = 0.0
         total_info = 0.0
-        total_geom = 0.0
         n_batches  = 0
 
         for batch_idx, (images, labels) in enumerate(self.train_loader):
@@ -189,13 +167,6 @@ class Phase1Trainer:
             trajectory   = self.backbone(images)
             flow_targets = self.backbone._flow_targets   # list of L x [B, D_flow]
             L = len(trajectory)
-
-            # [B, B, L] scalar similarity matrix for GeometryLoss
-            # f_l is L2-normalised so dot product = cosine similarity
-            profiles = torch.stack(
-                [flow_targets[l] @ flow_targets[l].t() for l in range(L)],
-                dim=-1,
-            )  # [B, B, L]
 
             # Meta-encoder forward
             z_list = self.meta_encoder(trajectory)   # list of L x [B, d]
@@ -213,11 +184,7 @@ class Phase1Trainer:
             ]   # list of L x [N_pairs, D_flow]
             info_loss = self.info_loss(z_pairs_a, z_pairs_b, flow_coact)
 
-            # --- L_geometry ---
-            geometry_loss = self.geometry_loss(z_list, profiles)
-
-            # --- Total ---
-            loss = self.info_loss_weight * info_loss + self.lambda_val * geometry_loss
+            loss = self.info_loss_weight * info_loss
 
             loss.backward()
             nn.utils.clip_grad_norm_(
@@ -228,21 +195,18 @@ class Phase1Trainer:
 
             total_loss += loss.item()
             total_info += info_loss.item()
-            total_geom += geometry_loss.item()
             n_batches  += 1
 
             if (batch_idx + 1) % log_interval == 0:
                 print(
                     f"  [{batch_idx+1}/{len(self.train_loader)}] "
                     f"loss={loss.item():.4f} "
-                    f"info={info_loss.item():.2e} "
-                    f"geom={geometry_loss.item():.4f}"
+                    f"info={info_loss.item():.2e}"
                 )
 
         return {
-            "loss":          total_loss / max(n_batches, 1),
-            "info_loss":     total_info / max(n_batches, 1),
-            "geometry_loss": total_geom / max(n_batches, 1),
+            "loss":      total_loss / max(n_batches, 1),
+            "info_loss": total_info / max(n_batches, 1),
         }
 
     @torch.no_grad()
@@ -306,8 +270,8 @@ class Phase1Trainer:
         mean_rho = float(np.mean(per_layer_rho)) if per_layer_rho else 0.0
 
         return {
-            "r2":           r2,
-            "mean_rho":     mean_rho,
+            "r2":            r2,
+            "mean_rho":      mean_rho,
             "per_layer_rho": per_layer_rho,
         }
 

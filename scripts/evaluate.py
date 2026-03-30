@@ -184,30 +184,29 @@ def main():
         disc_cfg = config.get("discovery", {})
         discovery = SpanCentricDiscovery(
             n_layers=L,
+            projection_dim=config["model"]["meta_encoder"].get("projection_dim", 128),
+            umap_n_components=disc_cfg.get("umap_n_components", 15),
+            umap_n_neighbors=disc_cfg.get("umap_n_neighbors", 15),
             min_cluster_fraction=disc_cfg.get("min_cluster_fraction", 0.01),
             max_cluster_fraction=disc_cfg.get("max_cluster_fraction", 0.40),
             min_cluster_size=disc_cfg.get("hdbscan_min_cluster_size", 5),
         )
 
         print("\n--- Circuit Discovery ---")
-        pair_indices = np.stack([idx_a.numpy(), idx_b.numpy()], axis=1)
+        z_list_np  = [z.numpy() for z in z_list]
+        labels_np  = labels.numpy()
 
-        # Discovery runs on z-space similarity profiles — the representation
-        # trained to organise pairs by circuit co-activation structure.
-        circuits = discovery.discover_all(z_sims, pair_indices)
+        circuits = discovery.discover_all(z_list_np)
         print(f"  Found {len(circuits)} canonical circuits")
 
         for i, c in enumerate(circuits):
-            purity = SpanCentricDiscovery.compute_class_purity(
-                c, pair_indices, labels.numpy()
-            )
+            purity = SpanCentricDiscovery.compute_class_purity(c, labels_np)
             c["purity"] = purity
             print(f"  Circuit {i}: span={c['span']}, size={c['size']}, "
-                  f"mean_sim={c['mean_similarity']:.3f}, purity={purity:.3f}")
+                  f"purity={purity:.3f}")
 
         # Criterion 4: Diversity
-        spans = [c["span"] for c in circuits]
-        div_result = circuit_diversity(spans, L)
+        div_result = circuit_diversity([c["span"] for c in circuits], L)
         print(f"\n  Criterion 4 — Coverage: {div_result['coverage']:.2f} "
               f"(target >= 0.6, {'PASS' if div_result['passes'] else 'FAIL'})")
 
@@ -219,8 +218,8 @@ def main():
                   f"Specific(>0.7): {pur_result['n_specific']} "
                   f"({'PASS' if pur_result['passes'] else 'FAIL'})")
 
-        # Multi-circuit membership
-        membership = discovery.multi_circuit_membership(circuits, n_pairs=z_sims.shape[0])
+        # Multi-circuit membership (per image)
+        membership = discovery.multi_circuit_membership(circuits, n_images=N)
         print(f"\n  Multi-circuit membership: "
               f"mean={membership.mean():.1f}, max={membership.max()}")
 

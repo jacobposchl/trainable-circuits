@@ -1,60 +1,62 @@
 """
-Span-centric circuit discovery pipeline.
+Image-centric span-centric circuit discovery pipeline.
 
-Enumerates all candidate contiguous spans [l_start, l_end], and for each span
-independently clusters input pairs by their within-span similarity structure.
-This allows a single pair to participate in multiple circuits at different
-depth ranges, which is the correct behavior for multi-circuit inputs.
+For each candidate contiguous span [l_start, l_end], concatenates per-image
+z-vectors across the span, runs UMAP for dimensionality reduction, then
+HDBSCAN to cluster images that activate the same circuit.
 
-Key steps per span:
-  1. Extract the span sub-vector from each pair's raw profile
-  2. Cluster with HDBSCAN on raw (un-normalized) sub-vectors
-  3. Filter by canonicality criterion: size in (min_cluster_fraction, max_cluster_fraction)
+Why image-centric instead of pairwise:
+  Pairwise dot products between L2-normalized high-dimensional vectors suffer
+  from concentration of measure — all similarities collapse to ~0 regardless
+  of whether images share a circuit.  Working directly on per-image z-vectors
+  avoids this: UMAP+HDBSCAN finds genuine density clusters in the
+  representation space rather than in a derived scalar similarity space.
 
-Raw sub-vectors (no softmax sharpening) are used so that the discovered clusters
-have elevated absolute similarity — the property the within-span elevation test
-(Criterion 3) checks.  Softmax sharpening would cluster by profile shape while
-discarding magnitude, making the elevation test impossible to pass.
+A circuit is a cluster of IMAGES that activate a contiguous span of layers
+in the same direction in z-space.  One image can belong to multiple circuits
+(at different spans), which is the correct behavior for multi-circuit inputs.
 """
 from __future__ import annotations
 
-from collections import defaultdict
-
-import hdbscan
 import numpy as np
-import torch
+import hdbscan
+import umap
 
 
 class SpanCentricDiscovery:
     """
-    Discover canonical circuits via span-centric clustering of alignment
-    profiles.
+    Discover canonical circuits via image-centric UMAP + HDBSCAN clustering.
     """
 
     def __init__(
         self,
         n_layers: int,
+        projection_dim: int,
+        umap_n_components: int = 15,
+        umap_n_neighbors: int = 15,
         min_cluster_fraction: float = 0.01,
         max_cluster_fraction: float = 0.40,
         min_cluster_size: int = 5,
-        max_pairs: int = 100_000,
     ):
         """
         Args:
             n_layers:             Number of backbone layers (L).
-            min_cluster_fraction: Minimum fraction of total pairs for canonicality.
-            max_cluster_fraction: Maximum fraction of total pairs — clusters larger
-                                  than this are degenerate mega-clusters (nearly the
-                                  whole dataset) and are excluded.
+            projection_dim:       Dimension d of each z-vector (= projection_dim
+                                  from MetaEncoder).  Used to construct span features.
+            umap_n_components:    Target dimensionality for UMAP reduction.
+            umap_n_neighbors:     n_neighbors parameter for UMAP.
+            min_cluster_fraction: Minimum fraction of total images for canonicality.
+            max_cluster_fraction: Maximum fraction — clusters larger than this are
+                                  degenerate and are excluded.
             min_cluster_size:     HDBSCAN min_cluster_size parameter.
-            max_pairs:            Maximum pairs to cluster per span (subsample
-                                  if more, for memory/compute tractability).
         """
         self.n_layers = n_layers
+        self.projection_dim = projection_dim
+        self.umap_n_components = umap_n_components
+        self.umap_n_neighbors = umap_n_neighbors
         self.min_cluster_fraction = min_cluster_fraction
         self.max_cluster_fraction = max_cluster_fraction
         self.min_cluster_size = min_cluster_size
-        self.max_pairs = max_pairs
 
     def enumerate_spans(self) -> list[tuple[int, int]]:
         """All L(L+1)/2 candidate contiguous spans [l_start, l_end]."""
@@ -64,239 +66,228 @@ class SpanCentricDiscovery:
                 spans.append((l_start, l_end))
         return spans
 
-    @staticmethod
-    def extract_span_subvector(
-        profiles: np.ndarray, span: tuple[int, int]
+    def _embed_span(
+        self, z_list: list[np.ndarray], span: tuple[int, int]
     ) -> np.ndarray:
         """
-        Extract the contiguous slice of raw profiles for a given span.
+        Concatenate z-vectors for each image across span layers.
 
         Args:
-            profiles: [N_pairs, L] raw alignment profile vectors
-            span:     (l_start, l_end) inclusive
+            z_list: list of L arrays, each [N, d]
+            span:   (l_start, l_end) inclusive
 
         Returns:
-            [N_pairs, span_len] sub-vectors
+            [N, span_len * d] feature matrix, one row per image
         """
         l_start, l_end = span
-        return profiles[:, l_start:l_end + 1]
+        return np.concatenate(
+            [z_list[l] for l in range(l_start, l_end + 1)], axis=1
+        )
 
-    def cluster_span(
-        self, subvectors: np.ndarray
-    ) -> tuple[np.ndarray, dict]:
+    def _reduce(self, X: np.ndarray) -> np.ndarray:
         """
-        Run HDBSCAN on raw sub-vectors for one span.
+        UMAP dimensionality reduction with cosine metric.
 
-        Args:
-            subvectors: [N_pairs, span_len] raw (un-normalized) similarity values
-
-        Returns:
-            labels:       [N_pairs] cluster assignments (-1 = noise)
-            cluster_info: dict mapping cluster_id -> {size, ...}
+        Cosine metric is appropriate because z-vectors are L2-normalized, so
+        cosine distance captures directional structure rather than magnitude.
         """
+        n_components = min(self.umap_n_components, X.shape[0] - 2)
+        n_neighbors  = min(self.umap_n_neighbors,  X.shape[0] - 1)
+        reducer = umap.UMAP(
+            n_components=n_components,
+            n_neighbors=n_neighbors,
+            metric="cosine",
+            random_state=42,
+            low_memory=False,
+        )
+        return reducer.fit_transform(X)
+
+    def _cluster(self, X: np.ndarray) -> np.ndarray:
+        """HDBSCAN clustering on UMAP-reduced features."""
         clusterer = hdbscan.HDBSCAN(
             min_cluster_size=self.min_cluster_size,
             min_samples=None,
             metric="euclidean",
         )
-        labels = clusterer.fit_predict(subvectors)
-
-        cluster_info = {}
-        for cid in set(labels):
-            if cid == -1:
-                continue
-            mask = labels == cid
-            cluster_info[cid] = {"size": int(mask.sum())}
-
-        return labels, cluster_info
+        return clusterer.fit_predict(X)
 
     def filter_canonical(
-        self, labels: np.ndarray, n_total_pairs: int
+        self, labels: np.ndarray, n_total: int
     ) -> list[int]:
         """
         Keep only clusters within the [min_cluster_fraction, max_cluster_fraction]
-        size window.  Clusters below the minimum are too sparse to be canonical.
-        Clusters above the maximum are degenerate mega-clusters that cover most of
-        the dataset and cannot produce meaningful within-span elevation.
+        size window.
 
         Args:
-            labels:        [N_pairs] cluster assignments
-            n_total_pairs: total number of pairs across all spans
+            labels:  [N] cluster assignments (-1 = noise)
+            n_total: total number of images
 
         Returns:
             List of canonical cluster IDs
         """
-        min_threshold = self.min_cluster_fraction * n_total_pairs
-        max_threshold = self.max_cluster_fraction * n_total_pairs
+        min_thresh = self.min_cluster_fraction * n_total
+        max_thresh = self.max_cluster_fraction * n_total
         canonical = []
         for cid in set(labels):
             if cid == -1:
                 continue
-            size = (labels == cid).sum()
-            if min_threshold <= size <= max_threshold:
+            size = int((labels == cid).sum())
+            if min_thresh <= size <= max_thresh:
                 canonical.append(cid)
         return canonical
 
     def discover_all(
-        self,
-        profiles: np.ndarray,
-        pair_indices: np.ndarray | None = None,
+        self, z_list: list[np.ndarray]
     ) -> list[dict]:
         """
         Full discovery pipeline across all spans.
 
-        Clusters on raw scalar similarity profiles so that discovered clusters
-        have genuinely elevated within-span similarity (both high shape-consistency
-        AND high absolute level), which is what Criterion 3 tests.
-
         Args:
-            profiles:     [N_pairs, L] raw alignment profile vectors
-            pair_indices: [N_pairs, 2] optional array of (idx_a, idx_b) for
-                          each pair, used for downstream analysis
+            z_list: list of L np.ndarray, each [N, d] — per-image z-vectors
+                    (L2-normalized) from the meta-encoder, one per layer.
 
         Returns:
             List of canonical circuit dicts, each containing:
-              - span: (l_start, l_end)
+              - span:       (l_start, l_end) inclusive
               - cluster_id: int
-              - pair_mask: boolean mask into profiles array
-              - size: number of pairs in cluster
-              - mean_similarity: mean within-span similarity
-              - std_similarity: std within-span similarity
+              - image_mask: [N] boolean mask — True for images in this circuit
+              - size:       number of images in cluster
         """
-        N = profiles.shape[0]
-        spans = self.enumerate_spans()
+        N = z_list[0].shape[0]
         circuits = []
 
-        for span in spans:
-            # Extract sub-vector for this span
-            subvec = self.extract_span_subvector(profiles, span)
+        for span in self.enumerate_spans():
+            # Build per-image feature matrix for this span
+            X = self._embed_span(z_list, span)  # [N, span_len * d]
 
-            # Skip single-layer spans
-            if subvec.shape[1] == 1:
+            # UMAP reduction
+            try:
+                X_reduced = self._reduce(X)
+            except Exception:
                 continue
 
-            # Subsample if too many pairs
-            if N > self.max_pairs:
-                sample_idx = np.random.choice(N, self.max_pairs, replace=False)
-                subvec_sample = subvec[sample_idx]
-            else:
-                sample_idx = np.arange(N)
-                subvec_sample = subvec
+            # HDBSCAN clustering
+            labels = self._cluster(X_reduced)
 
-            # Cluster on raw sub-vectors (no normalization — preserves magnitude)
-            labels, cluster_info = self.cluster_span(subvec_sample)
-
-            # Filter canonical: must be in (min, max) size window
+            # Filter canonical
             canonical_ids = self.filter_canonical(labels, N)
 
             for cid in canonical_ids:
-                mask_in_sample = labels == cid
-                global_indices = sample_idx[mask_in_sample]
-
-                # Compute mean within-span similarity from raw sub-vector
-                cluster_subvec = subvec[global_indices]
-                mean_sim = float(cluster_subvec.mean())
-                std_sim = float(cluster_subvec.std())
-
-                # Build full mask into profiles array
-                full_mask = np.zeros(N, dtype=bool)
-                full_mask[global_indices] = True
-
+                image_mask = labels == cid
                 circuits.append({
-                    "span": span,
+                    "span":       span,
                     "cluster_id": cid,
-                    "pair_mask": full_mask,
-                    "size": int(mask_in_sample.sum()),
-                    "mean_similarity": mean_sim,
-                    "std_similarity": std_sim,
+                    "image_mask": image_mask,
+                    "size":       int(image_mask.sum()),
                 })
 
         return circuits
 
+    def compute_span_similarities(
+        self,
+        z_list: list[np.ndarray],
+        span: tuple[int, int],
+        image_mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """
+        Compute mean pairwise z-cosine similarity over span layers.
+
+        For each pair of images (optionally restricted to those in image_mask),
+        returns the mean dot product across all layers in the span.  Since
+        z-vectors are L2-normalized, dot product = cosine similarity.
+
+        Args:
+            z_list:     list of L arrays, each [N, d]
+            span:       (l_start, l_end) inclusive
+            image_mask: optional [N] boolean — restrict to these images
+
+        Returns:
+            1D array of per-pair mean cosine similarities
+        """
+        l_start, l_end = span
+        span_len = l_end - l_start + 1
+
+        if image_mask is not None:
+            zs = [z_list[l][image_mask] for l in range(l_start, l_end + 1)]
+        else:
+            zs = [z_list[l] for l in range(l_start, l_end + 1)]
+
+        n = zs[0].shape[0]
+        sim_matrix = np.zeros((n, n))
+        for z in zs:
+            sim_matrix += z @ z.T
+        sim_matrix /= span_len
+
+        idx_a, idx_b = np.triu_indices(n, k=1)
+        return sim_matrix[idx_a, idx_b]
+
     @staticmethod
     def compute_class_purity(
         circuit: dict,
-        pair_indices: np.ndarray,
         labels: np.ndarray,
     ) -> float:
         """
-        Compute class purity for a circuit cluster.
+        Compute class purity for a circuit.
 
-        Class purity = fraction of unique inputs in the cluster that share
-        the most common class label.
+        Purity = fraction of images in the circuit belonging to the most
+        common class label.
 
         Args:
-            circuit:      circuit dict from discover_all
-            pair_indices: [N_pairs, 2] array of input indices per pair
-            labels:       [N_inputs] class labels
+            circuit: circuit dict from discover_all (must have 'image_mask')
+            labels:  [N] integer class labels
 
         Returns:
             Purity score in [0, 1]
         """
-        mask = circuit["pair_mask"]
-        pair_idx = pair_indices[mask]
-        unique_inputs = np.unique(pair_idx.ravel())
-        input_labels = labels[unique_inputs]
-
-        if len(input_labels) == 0:
+        circuit_labels = labels[circuit["image_mask"]]
+        if len(circuit_labels) == 0:
             return 0.0
-
-        counts = np.bincount(input_labels)
-        return float(counts.max()) / len(input_labels)
+        counts = np.bincount(circuit_labels)
+        return float(counts.max()) / len(circuit_labels)
 
     @staticmethod
     def multi_circuit_membership(
-        circuits: list[dict], n_pairs: int
+        circuits: list[dict], n_images: int
     ) -> np.ndarray:
         """
-        Count how many canonical circuits each pair participates in.
+        Count how many canonical circuits each image participates in.
 
         Args:
             circuits: list of circuit dicts from discover_all
-            n_pairs:  total number of pairs
+            n_images: total number of images
 
         Returns:
-            [N_pairs] array of membership counts
+            [N] array of membership counts
         """
-        counts = np.zeros(n_pairs, dtype=int)
+        counts = np.zeros(n_images, dtype=int)
         for circuit in circuits:
-            counts += circuit["pair_mask"].astype(int)
+            counts += circuit["image_mask"].astype(int)
         return counts
 
     @staticmethod
     def compute_prototypes(
         circuits: list[dict],
         z_list: list[np.ndarray],
-        pair_indices: np.ndarray,
     ) -> list[np.ndarray]:
         """
         Compute circuit prototype (centroid of z-vectors) for each circuit.
 
-        For each circuit at span [l_start, l_end], collect z-vectors at
-        those layers for all unique inputs in the cluster, and average.
+        For each circuit at span [l_start, l_end], averages z-vectors across
+        all images in the cluster and all layers in the span.
 
         Args:
-            circuits:     list of circuit dicts
-            z_list:       list of L arrays, each [N_inputs, d]
-            pair_indices: [N_pairs, 2]
+            circuits: list of circuit dicts
+            z_list:   list of L arrays, each [N, d]
 
         Returns:
-            List of prototype arrays, one per circuit
+            List of prototype arrays, one per circuit, each [d]
         """
         prototypes = []
         for circuit in circuits:
             l_start, l_end = circuit["span"]
-            mask = circuit["pair_mask"]
-            unique_inputs = np.unique(pair_indices[mask].ravel())
-
-            # Collect z-vectors for span layers
-            span_z = []
-            for l in range(l_start, l_end + 1):
-                span_z.append(z_list[l][unique_inputs])  # [N_unique, d]
-
-            # Stack and average over inputs and layers
-            stacked = np.stack(span_z, axis=0)  # [span_len, N_unique, d]
+            mask = circuit["image_mask"]
+            span_z = [z_list[l][mask] for l in range(l_start, l_end + 1)]
+            stacked = np.stack(span_z, axis=0)   # [span_len, N_cluster, d]
             prototype = stacked.mean(axis=(0, 1))  # [d]
             prototypes.append(prototype)
-
         return prototypes
