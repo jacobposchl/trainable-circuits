@@ -5,14 +5,15 @@ Animates how a single input progresses through the frozen backbone and
 meta-encoder simultaneously:
 
   Left   — 3-D stacked activation heatmaps (one plane per backbone block,
-            channel-max pooled to a 32×32 spatial map).  The current layer
-            lights up full brightness; past layers fade; future layers are
-            ghost-dim.
+            channel-max pooled to a 32×32 spatial map).  Layer index runs
+            along the X axis (L1 left → L8 right).  The current layer is
+            bright; past layers fade; future layers are ghost-dim.
 
-  Right  — Global UMAP embedding of all (image, layer) points.  Each frame
-            shows the population at the current depth coloured by class.  The
-            query image leaves a white comet trail as it moves through the
-            space.
+  Right  — Circuit flow diagram.  At each layer K-means clusters images
+            into circuit nodes (coloured rectangles, height ∝ population).
+            All N image paths flow as dim coloured threads.  The query
+            image's path lights up in white as the animation progresses,
+            revealing which circuit it rode through the network.
 
   Top    — Raw query image on the left; predicted class label on the right
             (both static).
@@ -21,7 +22,7 @@ meta-encoder simultaneously:
 
 Typical usage
 -------------
-  from evaluation import fit_trajectory_umap, animate_trajectory
+  from evaluation import precompute_circuit_flow, animate_trajectory
   from evaluation.circuit_analysis import CircuitAnalyzer, load_checkpoint
   from IPython.display import HTML
 
@@ -29,10 +30,9 @@ Typical usage
   analyzer = CircuitAnalyzer(backbone, meta_encoder, val_loader, device)
   data = analyzer.collect_representations(max_samples=2000)
 
-  # Precompute once (~20-40 s on CPU)
-  umap_coords, _ = fit_trajectory_umap(data["z_list"])
+  circuit_data = precompute_circuit_flow(data["z_list"], data["labels"])
 
-  anim = animate_trajectory(42, data, umap_coords, backbone, device)
+  anim = animate_trajectory(42, data, circuit_data, backbone, device)
   HTML(anim.to_jshtml())
 """
 from __future__ import annotations
@@ -42,16 +42,16 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from matplotlib.animation import FuncAnimation
+from matplotlib.collections import LineCollection
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 – registers 3d projection
 
 from evaluation.circuit_analysis import CIFAR10_CLASSES, denormalize
 from evaluation.circuit_viz import _COLOR_LIST
 
-_BG = "#111118"   # figure background colour
+_BG = "#111118"
 
 
 # --------------------------------------------------------------------------- #
@@ -128,6 +128,91 @@ def get_softmax_probs(
     return torch.softmax(logits[0], dim=0).cpu().numpy()
 
 
+def precompute_circuit_flow(
+    z_list: list[torch.Tensor],
+    labels: torch.Tensor | np.ndarray,
+    n_clusters: int = 6,
+    random_state: int = 42,
+) -> dict:
+    """
+    Cluster images at each layer into circuit nodes for the flow diagram.
+
+    At each layer the N z-vectors are grouped into ``n_clusters`` clusters
+    via K-means.  Clusters are sorted by dominant class to give a stable
+    vertical ordering.  The returned dict is passed directly to
+    ``animate_trajectory``.
+
+    Args:
+        z_list:       L tensors, each [N, d].
+        labels:       [N] integer class labels.
+        n_clusters:   Number of circuit nodes per layer (default 6).
+        random_state: K-means random seed.
+
+    Returns:
+        Dict with keys:
+          cluster_labels      [N, L] int — cluster index per image per layer
+          node_y_start        [L, K] float — bottom of each node in [0, 1]
+          node_y_end          [L, K] float — top of each node in [0, 1]
+          node_dominant_class [L, K] int   — most common class per node
+          n_clusters          int
+          n_layers            int
+    """
+    try:
+        from sklearn.cluster import KMeans
+    except ImportError:
+        raise ImportError("Install scikit-learn:  pip install scikit-learn")
+
+    L  = len(z_list)
+    N  = z_list[0].shape[0]
+    K  = n_clusters
+    labels_np = labels.numpy() if isinstance(labels, torch.Tensor) else np.asarray(labels)
+
+    raw_labels = np.zeros((N, L), dtype=int)
+    for l in range(L):
+        z = z_list[l].numpy() if isinstance(z_list[l], torch.Tensor) else np.asarray(z_list[l])
+        km = KMeans(n_clusters=K, random_state=random_state, n_init=5, max_iter=200)
+        raw_labels[:, l] = km.fit_predict(z)
+
+    # Per-layer: find dominant class, then sort clusters by that class so
+    # images of the same class flow through similar vertical regions.
+    node_dom_cls_raw  = np.zeros((L, K), dtype=int)
+    for l in range(L):
+        for k in range(K):
+            mask = raw_labels[:, l] == k
+            if mask.any():
+                node_dom_cls_raw[l, k] = np.bincount(labels_np[mask], minlength=10).argmax()
+
+    cluster_labels = np.zeros((N, L), dtype=int)
+    node_dom_cls   = np.zeros((L, K), dtype=int)
+    for l in range(L):
+        order  = np.argsort(node_dom_cls_raw[l])   # ascending by class id
+        remap  = np.empty(K, dtype=int)
+        for new_k, old_k in enumerate(order):
+            remap[old_k] = new_k
+        cluster_labels[:, l] = remap[raw_labels[:, l]]
+        node_dom_cls[l]      = node_dom_cls_raw[l][order]
+
+    # Compute node y-spans: stack proportionally by cluster size, [0, 1]
+    node_y_start = np.zeros((L, K))
+    node_y_end   = np.zeros((L, K))
+    for l in range(L):
+        y = 0.0
+        for k in range(K):
+            size = int((cluster_labels[:, l] == k).sum())
+            node_y_start[l, k] = y / N
+            node_y_end[l, k]   = (y + size) / N
+            y += size
+
+    return {
+        "cluster_labels":       cluster_labels,   # [N, L]
+        "node_y_start":         node_y_start,     # [L, K]
+        "node_y_end":           node_y_end,       # [L, K]
+        "node_dominant_class":  node_dom_cls,     # [L, K]
+        "n_clusters":           K,
+        "n_layers":             L,
+    }
+
+
 def fit_trajectory_umap(
     z_list: list[torch.Tensor],
     n_neighbors: int = 15,
@@ -136,18 +221,13 @@ def fit_trajectory_umap(
     """
     Fit a single global UMAP over all (image, layer) points.
 
-    Stacks all L layers into one [N*L, d] matrix and fits one 2-D UMAP, so
-    every image has a continuous L-step trajectory through a shared space.
-
-    Args:
-        z_list:       L tensors, each [N, d].
-        n_neighbors:  UMAP ``n_neighbors`` parameter.
-        random_state: Random seed for reproducibility.
+    Stacks all L layers into one [N*L, d] matrix and fits one 2-D UMAP.
+    Useful for standalone analysis; the main animation uses
+    ``precompute_circuit_flow`` instead.
 
     Returns:
-        coords:  [N, L, 2] float32 — 2-D coordinate for every (image, layer).
-        reducer: Fitted ``umap.UMAP`` object.  Keep it to transform new points
-                 with ``reducer.transform()``, or discard.
+        coords:  [N, L, 2] float32
+        reducer: fitted ``umap.UMAP`` object
     """
     try:
         import umap as umap_lib
@@ -160,7 +240,7 @@ def fit_trajectory_umap(
     stacked = np.concatenate([
         z.numpy() if isinstance(z, torch.Tensor) else np.asarray(z)
         for z in z_list
-    ], axis=0)                                      # [N*L, d]
+    ], axis=0)
 
     reducer = umap_lib.UMAP(
         n_components=2,
@@ -169,10 +249,8 @@ def fit_trajectory_umap(
         random_state=random_state,
         low_memory=False,
     )
-    embedded = reducer.fit_transform(stacked)       # [N*L, 2]
-
-    # First N rows = layer 0, next N = layer 1, …
-    coords = embedded.reshape(L, N, 2).transpose(1, 0, 2)  # [N, L, 2]
+    embedded = reducer.fit_transform(stacked)
+    coords   = embedded.reshape(L, N, 2).transpose(1, 0, 2)
     return coords.astype(np.float32), reducer
 
 
@@ -183,7 +261,7 @@ def fit_trajectory_umap(
 def animate_trajectory(
     image_idx: int,
     data: dict,
-    umap_coords: np.ndarray,
+    circuit_data: dict,
     backbone,
     device: torch.device,
     class_names: list[str] | None = None,
@@ -197,7 +275,7 @@ def animate_trajectory(
     Args:
         image_idx:    Index into ``data['images']`` to animate.
         data:         Dict from ``CircuitAnalyzer.collect_representations()``.
-        umap_coords:  [N, L, 2] array from ``fit_trajectory_umap()``.
+        circuit_data: Dict from ``precompute_circuit_flow()``.
         backbone:     FrozenBackbone — used for raw activations and softmax.
         device:       Torch device for the backbone.
         class_names:  Class name strings (len = num_classes).  Defaults to
@@ -213,12 +291,11 @@ def animate_trajectory(
     if class_names is None:
         class_names = CIFAR10_CLASSES
 
-    images    = data["images"]          # [N, 3, 32, 32]
+    images    = data["images"]
     labels    = data["labels"]
     L         = len(data["z_list"])
 
-    labels_np = labels.numpy() if isinstance(labels, torch.Tensor) else np.asarray(labels)
-
+    labels_np    = labels.numpy() if isinstance(labels, torch.Tensor) else np.asarray(labels)
     image_tensor = images[image_idx : image_idx + 1]
     label_idx    = int(labels_np[image_idx])
     true_name    = class_names[label_idx] if label_idx < len(class_names) else str(label_idx)
@@ -228,34 +305,22 @@ def animate_trajectory(
     pred_idx     = int(np.argmax(softmax_prob))
     pred_name    = class_names[pred_idx] if pred_idx < len(class_names) else str(pred_idx)
 
-    # Normalise each heatmap to [0, 1] for consistent colour scale
     norm_hmaps = []
     for hmap in heatmaps:
         lo, hi = hmap.min(), hmap.max()
         norm_hmaps.append((hmap - lo) / (hi - lo + 1e-8))
 
-    # Precompute fixed axis limits from ALL (image, layer) coords so the
-    # UMAP space never rescales between frames.
-    all_xy = umap_coords.reshape(-1, 2)
-    xpad   = (all_xy[:, 0].max() - all_xy[:, 0].min()) * 0.05
-    ypad   = (all_xy[:, 1].max() - all_xy[:, 1].min()) * 0.05
-    xy_lims = (
-        float(all_xy[:, 0].min() - xpad), float(all_xy[:, 0].max() + xpad),
-        float(all_xy[:, 1].min() - ypad), float(all_xy[:, 1].max() + ypad),
-    )
-
-    fig, ax_3d, ax_umap, ax_softmax = _make_figure(
+    fig, ax_3d, ax_flow, ax_softmax = _make_figure(
         image_tensor[0], softmax_prob, pred_idx, pred_name, true_name, class_names, dpi
     )
 
     def update(frame: int):
         ax_3d.cla()
-        ax_umap.cla()
+        ax_flow.cla()
         _draw_3d_stack(ax_3d, norm_hmaps, current_layer=frame)
-        _draw_umap_frame(
-            ax_umap, umap_coords, labels_np, image_idx,
+        _draw_circuit_flow(
+            ax_flow, circuit_data, labels_np, image_idx,
             current_layer=frame, class_names=class_names,
-            xy_lims=xy_lims,
         )
         return []
 
@@ -286,7 +351,7 @@ def _make_figure(
     (top strip and bottom softmax) immediately; returns animated axes.
 
     Returns:
-        (fig, ax_3d, ax_umap, ax_softmax)
+        (fig, ax_3d, ax_flow, ax_softmax)
     """
     fig = plt.figure(figsize=(11.9, 8.5), dpi=dpi, facecolor=_BG)
 
@@ -301,44 +366,41 @@ def _make_figure(
     ax_img_top  = fig.add_subplot(gs[0, 0])
     ax_text_top = fig.add_subplot(gs[0, 1])
     ax_3d       = fig.add_subplot(gs[1, 0], projection="3d")
-    ax_umap     = fig.add_subplot(gs[1, 1])
+    ax_flow     = fig.add_subplot(gs[1, 1])
     ax_softmax  = fig.add_subplot(gs[2, :])
 
-    # Style all axes backgrounds
-    for ax in (ax_img_top, ax_text_top, ax_umap, ax_softmax):
+    for ax in (ax_img_top, ax_text_top, ax_flow, ax_softmax):
         ax.set_facecolor(_BG)
         ax.tick_params(colors="white")
         for spine in ax.spines.values():
             spine.set_edgecolor("#444455")
 
-    # --- Static: input image ---
+    # Static: input image
     img_np = denormalize(image).permute(1, 2, 0).numpy()
     ax_img_top.imshow(np.clip(img_np, 0, 1), interpolation="nearest")
     ax_img_top.set_title("Input Image", fontsize=10, color="white", pad=3)
     ax_img_top.axis("off")
 
-    # --- Static: prediction text ---
+    # Static: prediction text
     ax_text_top.axis("off")
     correct = pred_name.lower() == true_name.lower()
     accent  = "#2ecc71" if correct else "#e74c3c"
     ax_text_top.text(
-        0.5, 0.62,
-        f"Predicted: {pred_name}",
+        0.5, 0.62, f"Predicted: {pred_name}",
         transform=ax_text_top.transAxes,
         fontsize=15, fontweight="bold",
         ha="center", va="center", color=accent,
     )
     ax_text_top.text(
-        0.5, 0.28,
-        f"True class: {true_name}",
+        0.5, 0.28, f"True class: {true_name}",
         transform=ax_text_top.transAxes,
         fontsize=11, ha="center", va="center", color="#aaaacc",
     )
 
-    # --- Static: softmax bars ---
+    # Static: softmax bars
     _draw_softmax(ax_softmax, softmax_prob, pred_idx, class_names)
 
-    return fig, ax_3d, ax_umap, ax_softmax
+    return fig, ax_3d, ax_flow, ax_softmax
 
 
 def _draw_softmax(
@@ -354,8 +416,6 @@ def _draw_softmax(
 
     bars = ax.bar(xs, probs, color=cols, edgecolor="#333344",
                   linewidth=0.6, alpha=0.88)
-
-    # Thicker border on predicted bar
     bars[pred_idx].set_edgecolor("white")
     bars[pred_idx].set_linewidth(2.0)
 
@@ -366,13 +426,10 @@ def _draw_softmax(
     ax.set_ylabel("Softmax prob.", fontsize=9, color="white")
     ax.set_title("Final Classification", fontsize=11, color="white", pad=4)
     ax.yaxis.set_tick_params(labelsize=8, labelcolor="white")
-
-    # Confidence label above predicted bar
     ax.text(
         pred_idx, probs[pred_idx] + 0.03,
         f"{probs[pred_idx]:.2f}",
-        ha="center", va="bottom", fontsize=9,
-        fontweight="bold", color="white",
+        ha="center", va="bottom", fontsize=9, fontweight="bold", color="white",
     )
 
 
@@ -400,7 +457,7 @@ def _draw_3d_stack(
     for l in range(L):
         alpha   = 1.00 if l == current_layer else (0.22 if l < current_layer else 0.07)
         X_layer = np.full_like(Y_grid, float(l))
-        fc      = hot(heatmaps[l]).copy()       # [H, W, 4]
+        fc      = hot(heatmaps[l]).copy()
         fc[..., 3] = alpha
 
         ax3d.plot_surface(X_layer, Y_grid, Z_grid, facecolors=fc,
@@ -429,7 +486,7 @@ def _draw_3d_stack(
     try:
         ax3d.set_box_aspect([L * 0.35, 1, 1])
     except AttributeError:
-        pass  # matplotlib < 3.3
+        pass
 
     ax3d.set_facecolor(_BG)
     for pane in (ax3d.xaxis.pane, ax3d.yaxis.pane, ax3d.zaxis.pane):
@@ -439,80 +496,104 @@ def _draw_3d_stack(
     ax3d.tick_params(colors="white")
 
 
-def _draw_umap_frame(
+def _draw_circuit_flow(
     ax: plt.Axes,
-    umap_coords: np.ndarray,
+    circuit_data: dict,
     labels: np.ndarray,
     image_idx: int,
     current_layer: int,
     class_names: list[str],
-    xy_lims: tuple[float, float, float, float] | None = None,
 ) -> None:
     """
-    Render one UMAP animation frame.
+    Render the circuit flow diagram for one animation frame.
 
-    Background: all (image, layer) points as a dim grey cloud — keeps the
-    coordinate space stable and full across every frame.
-    Population: all N images at ``current_layer``, coloured by class.
-    Trail: query image path from layer 0 → current_layer with comet fade.
-    Current position: bright white dot with gold ring.
+    Each layer has K coloured rectangular nodes (height ∝ fraction of images
+    in that cluster, colour = dominant class).  All N image paths are drawn
+    as dim coloured threads behind the nodes.  The query image's path from
+    L1 → current_layer is drawn in bright white, showing which circuit it
+    has taken so far.
+
+    Args:
+        ax:            Matplotlib axes to draw on.
+        circuit_data:  Dict from ``precompute_circuit_flow()``.
+        labels:        [N] integer class labels.
+        image_idx:     Which image to highlight.
+        current_layer: Current animation frame (0-indexed).
+        class_names:   Class name strings.
     """
-    L = umap_coords.shape[1]
+    cluster_labels = circuit_data["cluster_labels"]    # [N, L]
+    node_y_start   = circuit_data["node_y_start"]      # [L, K]
+    node_y_end     = circuit_data["node_y_end"]        # [L, K]
+    node_dom_cls   = circuit_data["node_dominant_class"]
+    L              = circuit_data["n_layers"]
+    K              = circuit_data["n_clusters"]
+    N              = cluster_labels.shape[0]
 
-    # Dim full-dataset background — every (image, layer) point, always visible.
-    # This anchors the space so it never rescales or shifts between frames.
-    all_xy = umap_coords.reshape(-1, 2)
-    ax.scatter(all_xy[:, 0], all_xy[:, 1], c="#2a2a40", s=2,
-               alpha=1.0, rasterized=True, zorder=1)
+    def _node_center(l: int, n: int) -> float:
+        k = cluster_labels[n, l]
+        return (node_y_start[l, k] + node_y_end[l, k]) / 2
 
-    # Highlighted population at current layer, coloured by class
-    pop = umap_coords[:, current_layer, :]          # [N, 2]
-    for cls in range(10):
-        mask = labels == cls
-        if not mask.any():
-            continue
-        c = _COLOR_LIST[cls] if cls < 10 else "gray"
-        ax.scatter(pop[mask, 0], pop[mask, 1], c=[c], s=6,
-                   alpha=0.70, rasterized=True, zorder=2,
-                   label=class_names[cls] if cls < len(class_names) else str(cls))
+    # --- Background: all N image paths as dim coloured threads ---
+    all_segs   = []
+    all_colors = []
+    for n in range(N):
+        ys = [_node_center(l, n) for l in range(L)]
+        all_segs.append(list(zip(range(L), ys)))
+        all_colors.append(_COLOR_LIST[int(labels[n]) % 10])
 
-    # Comet trail for query image
-    n_trail = current_layer + 1
-    for i in range(n_trail):
-        frac = (i + 1) / n_trail          # 0 = oldest, 1 = newest
-        x, y = umap_coords[image_idx, i, 0], umap_coords[image_idx, i, 1]
-        is_current = (i == n_trail - 1)
+    lc = LineCollection(all_segs, colors=all_colors, alpha=0.04,
+                        linewidth=0.5, zorder=1)
+    ax.add_collection(lc)
 
-        if is_current:
-            ax.scatter(x, y, c="white", s=130, alpha=1.0, zorder=6,
-                       edgecolors="gold", linewidths=1.8)
-        else:
-            alpha_pt = 0.15 + 0.60 * frac
-            size_pt  = 15  + 55  * frac
-            ax.scatter(x, y, c="white", s=size_pt, alpha=alpha_pt,
-                       zorder=5, edgecolors="none")
+    # --- Node rectangles at each layer ---
+    node_half_w = 0.12
+    for l in range(L):
+        for k in range(K):
+            y0 = node_y_start[l, k]
+            y1 = node_y_end[l, k]
+            if y1 - y0 < 1e-4:
+                continue
+            is_query = (cluster_labels[image_idx, l] == k)
+            color    = _COLOR_LIST[int(node_dom_cls[l, k]) % 10]
+            rect     = plt.Rectangle(
+                (l - node_half_w, y0), 2 * node_half_w, y1 - y0,
+                facecolor=color,
+                edgecolor="white" if is_query else "#444455",
+                linewidth=1.2 if is_query else 0.3,
+                alpha=0.90 if is_query else 0.50,
+                zorder=3,
+            )
+            ax.add_patch(rect)
 
-    # Trail line
-    if current_layer > 0:
-        tx = umap_coords[image_idx, :current_layer + 1, 0]
-        ty = umap_coords[image_idx, :current_layer + 1, 1]
-        ax.plot(tx, ty, color="white", linewidth=1.0, alpha=0.45, zorder=4)
+    # --- Query image path up to current_layer ---
+    qx = list(range(current_layer + 1))
+    qy = [_node_center(l, image_idx) for l in qx]
+    ax.plot(qx, qy, color="white", linewidth=2.5, alpha=1.0, zorder=10,
+            solid_capstyle="round", solid_joinstyle="round")
 
-    ax.set_facecolor(_BG)
-    ax.set_xticks([])
+    # Current position dot
+    ax.scatter(current_layer, qy[-1], c="gold", s=90, zorder=11,
+               edgecolors="white", linewidths=1.5)
+
+    # --- Axis styling ---
+    ax.set_xlim(-0.5, L - 0.5)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xticks(range(L))
+    ax.set_xticklabels([f"L{l + 1}" for l in range(L)],
+                       fontsize=8, color="white")
     ax.set_yticks([])
-    ax.set_title(f"z-Space (UMAP) — Layer {current_layer + 1}/{L}",
+    ax.set_facecolor(_BG)
+    ax.set_xlabel("Layer", fontsize=9, color="white")
+    ax.set_title(f"Circuit Flow — Layer {current_layer + 1}/{L}",
                  fontsize=10, color="white", pad=4)
-
-    # Lock axes to the global extent so the space never rescales between frames
-    if xy_lims is not None:
-        ax.set_xlim(xy_lims[0], xy_lims[1])
-        ax.set_ylim(xy_lims[2], xy_lims[3])
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#333344")
+    ax.tick_params(axis="x", colors="white")
 
     # Compact class legend
     handles = [
         plt.Line2D([0], [0], marker="o", color="w",
-                   markerfacecolor=_COLOR_LIST[i] if i < 10 else "gray",
+                   markerfacecolor=_COLOR_LIST[i % 10],
                    label=class_names[i] if i < len(class_names) else str(i),
                    markersize=5)
         for i in range(min(10, len(class_names)))

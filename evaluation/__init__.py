@@ -31,6 +31,7 @@ from evaluation.trajectory_viz import (
     collect_raw_activations,
     fit_trajectory_umap,
     get_softmax_probs,
+    precompute_circuit_flow,
 )
 
 __all__ = [
@@ -61,4 +62,5 @@ __all__ = [
     "collect_raw_activations",
     "fit_trajectory_umap",
     "get_softmax_probs",
+    "precompute_circuit_flow",
 ]
