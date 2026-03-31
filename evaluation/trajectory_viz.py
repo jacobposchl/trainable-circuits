@@ -234,6 +234,16 @@ def animate_trajectory(
         lo, hi = hmap.min(), hmap.max()
         norm_hmaps.append((hmap - lo) / (hi - lo + 1e-8))
 
+    # Precompute fixed axis limits from ALL (image, layer) coords so the
+    # UMAP space never rescales between frames.
+    all_xy = umap_coords.reshape(-1, 2)
+    xpad   = (all_xy[:, 0].max() - all_xy[:, 0].min()) * 0.05
+    ypad   = (all_xy[:, 1].max() - all_xy[:, 1].min()) * 0.05
+    xy_lims = (
+        float(all_xy[:, 0].min() - xpad), float(all_xy[:, 0].max() + xpad),
+        float(all_xy[:, 1].min() - ypad), float(all_xy[:, 1].max() + ypad),
+    )
+
     fig, ax_3d, ax_umap, ax_softmax = _make_figure(
         image_tensor[0], softmax_prob, pred_idx, pred_name, true_name, class_names, dpi
     )
@@ -245,6 +255,7 @@ def animate_trajectory(
         _draw_umap_frame(
             ax_umap, umap_coords, labels_np, image_idx,
             current_layer=frame, class_names=class_names,
+            xy_lims=xy_lims,
         )
         return []
 
@@ -277,7 +288,7 @@ def _make_figure(
     Returns:
         (fig, ax_3d, ax_umap, ax_softmax)
     """
-    fig = plt.figure(figsize=(14, 10), dpi=dpi, facecolor=_BG)
+    fig = plt.figure(figsize=(11.9, 8.5), dpi=dpi, facecolor=_BG)
 
     gs = gridspec.GridSpec(
         3, 2,
@@ -373,50 +384,50 @@ def _draw_3d_stack(
     """
     Render all L activation heatmap planes in 3-D space.
 
-    Each plane sits at z = layer_index.  Alpha schedule:
+    Layer index maps to the X axis (L1 on the left, L8 on the right).
+    Spatial content spans Y (width) and Z (height).  Alpha schedule:
       future layers  → 0.07 (ghost)
       past layers    → 0.22 (faded)
       current layer  → 1.00 (bright), with a white highlight border
     """
     L = len(heatmaps)
     H, W = heatmaps[0].shape
-    xs = np.linspace(0, 1, W)
-    ys = np.linspace(0, 1, H)
-    X, Y = np.meshgrid(xs, ys)
-    hot  = plt.get_cmap("hot")
+    ys = np.linspace(0, 1, W)
+    zs = np.linspace(0, 1, H)
+    Y_grid, Z_grid = np.meshgrid(ys, zs)
+    hot = plt.get_cmap("hot")
 
     for l in range(L):
-        alpha = 1.00 if l == current_layer else (0.22 if l < current_layer else 0.07)
-        Z     = np.full_like(X, float(l))
-        fc    = hot(heatmaps[l])            # [H, W, 4]
-        fc    = fc.copy()
+        alpha   = 1.00 if l == current_layer else (0.22 if l < current_layer else 0.07)
+        X_layer = np.full_like(Y_grid, float(l))
+        fc      = hot(heatmaps[l]).copy()       # [H, W, 4]
         fc[..., 3] = alpha
 
-        ax3d.plot_surface(X, Y, Z, facecolors=fc, shade=False,
-                          linewidth=0, antialiased=False)
+        ax3d.plot_surface(X_layer, Y_grid, Z_grid, facecolors=fc,
+                          shade=False, linewidth=0, antialiased=False)
 
         if l == current_layer:
-            bx = [0, 1, 1, 0, 0]
-            by = [0, 0, 1, 1, 0]
-            bz = [l] * 5
+            bx = [l] * 5
+            by = [0, 1, 1, 0, 0]
+            bz = [0, 0, 1, 1, 0]
             ax3d.plot(bx, by, bz, color="white", linewidth=1.4, alpha=0.95)
 
-    ax3d.set_zlim(-0.5, L - 0.5)
-    ax3d.set_xlim(0, 1)
+    ax3d.set_xlim(-0.5, L - 0.5)
     ax3d.set_ylim(0, 1)
-    ax3d.set_zticks(range(L))
-    ax3d.set_zticklabels([f"L{l + 1}" for l in range(L)], fontsize=7, color="white")
-    ax3d.set_xticklabels([])
+    ax3d.set_zlim(0, 1)
+    ax3d.set_xticks(range(L))
+    ax3d.set_xticklabels([f"L{l + 1}" for l in range(L)], fontsize=7, color="white")
     ax3d.set_yticklabels([])
-    ax3d.set_xlabel("", labelpad=-10)
+    ax3d.set_zticklabels([])
+    ax3d.set_xlabel("Layer", fontsize=9, color="white", labelpad=5)
     ax3d.set_ylabel("", labelpad=-10)
-    ax3d.set_zlabel("Layer", fontsize=9, color="white", labelpad=5)
+    ax3d.set_zlabel("", labelpad=-10)
     ax3d.set_title(f"Activations — Layer {current_layer + 1}/{L}",
                    fontsize=10, color="white", pad=6)
-    ax3d.view_init(elev=25, azim=-55)
+    ax3d.view_init(elev=20, azim=-65)
 
     try:
-        ax3d.set_box_aspect([1, 1, L * 0.35])
+        ax3d.set_box_aspect([L * 0.35, 1, 1])
     except AttributeError:
         pass  # matplotlib < 3.3
 
@@ -435,25 +446,34 @@ def _draw_umap_frame(
     image_idx: int,
     current_layer: int,
     class_names: list[str],
+    xy_lims: tuple[float, float, float, float] | None = None,
 ) -> None:
     """
     Render one UMAP animation frame.
 
+    Background: all (image, layer) points as a dim grey cloud — keeps the
+    coordinate space stable and full across every frame.
     Population: all N images at ``current_layer``, coloured by class.
     Trail: query image path from layer 0 → current_layer with comet fade.
     Current position: bright white dot with gold ring.
     """
     L = umap_coords.shape[1]
 
-    # Background population at current layer
+    # Dim full-dataset background — every (image, layer) point, always visible.
+    # This anchors the space so it never rescales or shifts between frames.
+    all_xy = umap_coords.reshape(-1, 2)
+    ax.scatter(all_xy[:, 0], all_xy[:, 1], c="#2a2a40", s=2,
+               alpha=1.0, rasterized=True, zorder=1)
+
+    # Highlighted population at current layer, coloured by class
     pop = umap_coords[:, current_layer, :]          # [N, 2]
     for cls in range(10):
         mask = labels == cls
         if not mask.any():
             continue
         c = _COLOR_LIST[cls] if cls < 10 else "gray"
-        ax.scatter(pop[mask, 0], pop[mask, 1], c=[c], s=4,
-                   alpha=0.35, rasterized=True,
+        ax.scatter(pop[mask, 0], pop[mask, 1], c=[c], s=6,
+                   alpha=0.70, rasterized=True, zorder=2,
                    label=class_names[cls] if cls < len(class_names) else str(cls))
 
     # Comet trail for query image
@@ -483,6 +503,11 @@ def _draw_umap_frame(
     ax.set_yticks([])
     ax.set_title(f"z-Space (UMAP) — Layer {current_layer + 1}/{L}",
                  fontsize=10, color="white", pad=4)
+
+    # Lock axes to the global extent so the space never rescales between frames
+    if xy_lims is not None:
+        ax.set_xlim(xy_lims[0], xy_lims[1])
+        ax.set_ylim(xy_lims[2], xy_lims[3])
 
     # Compact class legend
     handles = [
