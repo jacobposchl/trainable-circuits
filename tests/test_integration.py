@@ -151,6 +151,7 @@ def test_phase1_trainer_early_stops_when_validation_stalls(monkeypatch, minimal_
     )
     monkeypatch.setattr(trainer, "_val_epoch", lambda: next(val_sequence))
     monkeypatch.setattr(trainer, "_save_checkpoint", lambda epoch, val_metrics, name: saved.append((epoch, name)))
+    monkeypatch.setattr(trainer.lr_scheduler, "step", lambda: None)
 
     trainer.train()
 

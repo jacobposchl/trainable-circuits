@@ -26,6 +26,12 @@ from evaluation.metrics import (
     circuit_diversity,
     class_purity_distribution,
 )
+from evaluation.trajectory_viz import (
+    animate_trajectory,
+    collect_raw_activations,
+    fit_trajectory_umap,
+    get_softmax_probs,
+)
 
 __all__ = [
     "CircuitAnalyzer",
@@ -51,4 +57,8 @@ __all__ = [
     "within_span_elevation",
     "circuit_diversity",
     "class_purity_distribution",
+    "animate_trajectory",
+    "collect_raw_activations",
+    "fit_trajectory_umap",
+    "get_softmax_probs",
 ]
