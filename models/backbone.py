@@ -106,8 +106,8 @@ class FrozenBackbone(nn.Module):
         return list(self._trajectory)
 
     def train(self, mode: bool = True):
-        """No-op: backbone stays in eval mode permanently."""
-        return self
+        """Force eval mode permanently, regardless of the requested mode."""
+        return super().train(False)
 
     # ------------------------------------------------------------------ #
     # Internal: compression module construction (two-pass)

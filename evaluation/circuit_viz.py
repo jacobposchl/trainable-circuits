@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
 
 from evaluation.circuit_analysis import CIFAR10_CLASSES, denormalize
 
-_COLORS = cm.get_cmap("tab10", 10)
+_COLORS = plt.get_cmap("tab10", 10)
 _COLOR_LIST = [_COLORS(i) for i in range(10)]
 
 

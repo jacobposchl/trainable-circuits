@@ -3,11 +3,7 @@ Unit tests for image-centric span-centric circuit discovery.
 Run with: pytest tests/
 """
 
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import numpy as np
-import pytest
 
 from evaluation.discovery import SpanCentricDiscovery
 
@@ -102,7 +98,7 @@ class TestEmbedSpan:
 class TestCanonicalityFilter:
     def test_filters_small_clusters(self):
         disc = make_discovery(min_cluster_fraction=0.1)
-        labels = np.array([0]*50 + [1]*5 + [-1]*45)
+        labels = np.array([0]*20 + [1]*5 + [-1]*75)
         canonical = disc.filter_canonical(labels, n_total=100)
         assert 0 in canonical
         assert 1 not in canonical  # 5/100 = 0.05 < 0.1

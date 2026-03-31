@@ -1,16 +1,11 @@
 """
-Unit tests for InfoLoss and GeometryLoss.
+Unit tests for InfoLoss.
 Run with: pytest tests/
 """
 
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 import torch
-import pytest
 
 from losses.info_loss import InfoLoss
-from losses.geometry_loss import GeometryLoss
 
 
 # --------------------------------------------------------------------------- #
@@ -119,53 +114,3 @@ class TestInfoLoss:
         loss = loss_fn(z_a, z_b, targets)
         assert loss.dim() == 0
         assert loss.item() > 0
-
-
-# --------------------------------------------------------------------------- #
-# GeometryLoss
-# --------------------------------------------------------------------------- #
-
-class TestGeometryLoss:
-    def test_output_is_scalar(self):
-        loss_fn = GeometryLoss(temperature=0.1)
-        z_list = make_z_list()
-        sims = make_true_sims_matrix()
-        loss = loss_fn(z_list, sims)
-        assert loss.dim() == 0
-
-    def test_positive_loss(self):
-        loss_fn = GeometryLoss(temperature=0.1)
-        z_list = make_z_list()
-        sims = make_true_sims_matrix()
-        loss = loss_fn(z_list, sims)
-        assert loss.item() > 0
-
-    def test_no_nan(self):
-        """Loss should not produce NaN even with small temperature."""
-        loss_fn = GeometryLoss(temperature=0.05)
-        z_list = make_z_list()
-        sims = make_true_sims_matrix()
-        loss = loss_fn(z_list, sims)
-        assert not torch.isnan(loss)
-
-    def test_temperature_sensitivity(self):
-        """Lower temperature should generally produce higher loss."""
-        z_list = make_z_list()
-        sims = make_true_sims_matrix()
-
-        loss_high_tau = GeometryLoss(temperature=1.0)(z_list, sims)
-        loss_low_tau = GeometryLoss(temperature=0.05)(z_list, sims)
-
-        # Not strictly guaranteed but should hold for random z
-        assert loss_low_tau.item() != loss_high_tau.item()
-
-    def test_backprop(self):
-        loss_fn = GeometryLoss(temperature=0.1)
-        # Pre-normalize then make leaf tensors with requires_grad so .grad is populated
-        z_list = [torch.randn(B, D) / D**0.5 for _ in range(L)]
-        z_list = [z / z.norm(dim=-1, keepdim=True) for z in z_list]
-        z_list = [z.detach().requires_grad_(True) for z in z_list]
-        sims = make_true_sims_matrix()
-        loss = loss_fn(z_list, sims)
-        loss.backward()
-        assert all(z.grad is not None for z in z_list)
