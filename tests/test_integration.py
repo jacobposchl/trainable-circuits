@@ -110,7 +110,49 @@ def test_phase1_trainer_checkpoint_round_trip(monkeypatch, minimal_config, tmp_p
     next_epoch = reloaded._load_checkpoint(str(tmp_path / "ckpts" / "roundtrip.pt"))
 
     assert next_epoch == 2
+    for key, value in trainer.backbone.state_dict().items():
+        torch.testing.assert_close(reloaded.backbone.state_dict()[key], value)
     for key, value in trainer.meta_encoder.state_dict().items():
         torch.testing.assert_close(reloaded.meta_encoder.state_dict()[key], value)
     for key, value in trainer.info_loss.state_dict().items():
         torch.testing.assert_close(reloaded.info_loss.state_dict()[key], value)
+
+
+def test_phase1_trainer_early_stops_when_validation_stalls(monkeypatch, minimal_config):
+    loader = _make_loader()
+    monkeypatch.setattr(
+        "training.unified_trainer.get_standard_loaders",
+        lambda **kwargs: (loader, loader),
+    )
+
+    config = copy.deepcopy(minimal_config)
+    config["training"]["epochs"] = 10
+    config["training"]["early_stopping_patience"] = 2
+    config["training"]["early_stopping_min_delta"] = 0.01
+
+    trainer = Phase1Trainer(config)
+
+    train_calls = []
+    val_sequence = iter(
+        [
+            {"r2": 0.10, "mean_rho": 0.10, "per_layer_rho": [0.1] * len(trainer.backbone.layer_dims)},
+            {"r2": 0.25, "mean_rho": 0.12, "per_layer_rho": [0.1] * len(trainer.backbone.layer_dims)},
+            {"r2": 0.255, "mean_rho": 0.12, "per_layer_rho": [0.1] * len(trainer.backbone.layer_dims)},
+            {"r2": 0.251, "mean_rho": 0.12, "per_layer_rho": [0.1] * len(trainer.backbone.layer_dims)},
+            {"r2": 0.30, "mean_rho": 0.12, "per_layer_rho": [0.1] * len(trainer.backbone.layer_dims)},
+        ]
+    )
+    saved = []
+
+    monkeypatch.setattr(
+        trainer,
+        "_train_epoch",
+        lambda epoch, log_interval: train_calls.append(epoch) or {"loss": 1.0, "info_loss": 0.2},
+    )
+    monkeypatch.setattr(trainer, "_val_epoch", lambda: next(val_sequence))
+    monkeypatch.setattr(trainer, "_save_checkpoint", lambda epoch, val_metrics, name: saved.append((epoch, name)))
+
+    trainer.train()
+
+    assert train_calls == [0, 1, 2, 3]
+    assert (1, "best.pt") in saved

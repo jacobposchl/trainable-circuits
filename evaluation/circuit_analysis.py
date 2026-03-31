@@ -257,6 +257,7 @@ def load_checkpoint(
         pretrained=mcfg.get("pretrained", True),
         grid_size=fcfg.get("grid_size", 4),
         flow_dim=fcfg.get("flow_dim", 256),
+        trainable_stem=mcfg.get("trainable_stem", False),
     ).to(device)
 
     meta_encoder = MetaEncoder(
@@ -274,6 +275,8 @@ def load_checkpoint(
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if "backbone_state" in ckpt:
+        backbone.load_state_dict(ckpt["backbone_state"])
     meta_encoder.load_state_dict(ckpt["meta_encoder_state"])
     info_loss.load_state_dict(ckpt["info_loss_state"])
 

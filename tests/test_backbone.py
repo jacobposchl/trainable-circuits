@@ -77,3 +77,35 @@ def test_compressor_weights_are_reproducible():
 def test_model_head_matches_requested_class_count():
     backbone = FrozenBackbone("resnet18", num_classes=17, pretrained=False, grid_size=2, flow_dim=32)
     assert backbone.model.fc.out_features == 17
+
+
+def test_trainable_stem_is_the_only_unfrozen_backbone_component():
+    backbone = FrozenBackbone(
+        "resnet18",
+        num_classes=10,
+        pretrained=False,
+        grid_size=2,
+        flow_dim=32,
+        trainable_stem=True,
+    )
+
+    trainable = [name for name, param in backbone.named_parameters() if param.requires_grad]
+
+    assert trainable == ["model.conv1.weight"]
+
+
+def test_trainable_stem_preserves_grad_through_trajectory_only():
+    backbone = FrozenBackbone(
+        "resnet18",
+        num_classes=10,
+        pretrained=False,
+        grid_size=2,
+        flow_dim=32,
+        trainable_stem=True,
+    )
+    images = torch.randn(2, 3, 32, 32, requires_grad=True)
+
+    trajectory = backbone(images)
+
+    assert trajectory[0].requires_grad
+    assert not backbone._flow_targets[0].requires_grad

@@ -1,8 +1,9 @@
 """
 Phase 1 Trainer: Meta-Encoder Validation.
 
-Trains a meta-encoder to learn circuit-space representations from a frozen
-backbone's activation trajectories. The backbone is never modified.
+Trains a meta-encoder to learn circuit-space representations from a mostly
+frozen backbone's activation trajectories. By default the backbone stays frozen,
+but configs may opt into training the CIFAR-adapted ResNet stem conv.
 
     L_total = L_info
 
@@ -37,6 +38,7 @@ class Phase1Trainer:
     def __init__(self, config: dict):
         self.cfg = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self._loaded_val_metrics: dict = {}
 
         self._build_models()
         self._build_data()
@@ -60,6 +62,7 @@ class Phase1Trainer:
             pretrained=mcfg.get("pretrained", True),
             grid_size=fcfg.get("grid_size", 4),
             flow_dim=fcfg.get("flow_dim", 256),
+            trainable_stem=mcfg.get("trainable_stem", False),
         ).to(self.device)
 
         ecfg = mcfg["meta_encoder"]
@@ -84,8 +87,10 @@ class Phase1Trainer:
     def _build_optimizers(self):
         tcfg = self.cfg["training"]
         lr = float(tcfg.get("lr", 1e-3))
+        backbone_params = [p for p in self.backbone.parameters() if p.requires_grad]
         params = (
-            list(self.meta_encoder.parameters())
+            backbone_params
+            + list(self.meta_encoder.parameters())
             + list(self.info_loss.parameters())
         )
         self.optimizer = AdamW(
@@ -120,9 +125,14 @@ class Phase1Trainer:
     def train(self, resume_from: str | None = None):
         start_epoch = 0
         best_val_r2 = -float("inf")
+        tcfg = self.cfg["training"]
+        patience = tcfg.get("early_stopping_patience")
+        min_delta = float(tcfg.get("early_stopping_min_delta", 0.0))
+        epochs_without_improvement = 0
 
         if resume_from is not None:
             start_epoch = self._load_checkpoint(resume_from)
+            best_val_r2 = float(self._loaded_val_metrics.get("r2", best_val_r2))
 
         epochs       = self.cfg["training"]["epochs"]
         log_interval = self.cfg["logging"].get("log_interval", 50)
@@ -141,13 +151,24 @@ class Phase1Trainer:
                 f"val_rho={val_metrics['mean_rho']:.3f}"
             )
 
-            is_best = val_metrics["r2"] > best_val_r2
+            is_best = val_metrics["r2"] > (best_val_r2 + min_delta)
             if is_best:
                 best_val_r2 = val_metrics["r2"]
+                epochs_without_improvement = 0
                 self._save_checkpoint(epoch, val_metrics, name="best.pt")
+            else:
+                epochs_without_improvement += 1
 
             if (epoch + 1) % save_every == 0:
                 self._save_checkpoint(epoch, val_metrics, name=f"epoch_{epoch+1}.pt")
+
+            if patience is not None and patience > 0 and epochs_without_improvement >= patience:
+                print(
+                    f"Early stopping at epoch {epoch+1}: "
+                    f"val_R2 has not improved by at least {min_delta:.4f} "
+                    f"for {patience} epoch(s)."
+                )
+                break
 
     def _train_epoch(self, epoch: int, log_interval: int) -> dict:
         self.meta_encoder.train()
@@ -188,7 +209,9 @@ class Phase1Trainer:
 
             loss.backward()
             nn.utils.clip_grad_norm_(
-                list(self.meta_encoder.parameters()) + list(self.info_loss.parameters()),
+                [p for p in self.backbone.parameters() if p.requires_grad]
+                + list(self.meta_encoder.parameters())
+                + list(self.info_loss.parameters()),
                 max_norm=1.0,
             )
             self.optimizer.step()
@@ -285,6 +308,7 @@ class Phase1Trainer:
             {
                 "epoch":               epoch,
                 "val_metrics":         val_metrics,
+                "backbone_state":      self.backbone.state_dict(),
                 "meta_encoder_state":  self.meta_encoder.state_dict(),
                 "info_loss_state":     self.info_loss.state_dict(),
                 "optimizer_state":     self.optimizer.state_dict(),
@@ -295,10 +319,16 @@ class Phase1Trainer:
 
     def _load_checkpoint(self, path: str) -> int:
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        if "backbone_state" in ckpt:
+            self.backbone.load_state_dict(ckpt["backbone_state"])
         self.meta_encoder.load_state_dict(ckpt["meta_encoder_state"])
         self.info_loss.load_state_dict(ckpt["info_loss_state"])
-        self.optimizer.load_state_dict(ckpt["optimizer_state"])
+        try:
+            self.optimizer.load_state_dict(ckpt["optimizer_state"])
+        except ValueError:
+            print("Warning: optimizer state could not be restored; continuing with a fresh optimizer.")
         metrics = ckpt.get("val_metrics", {})
+        self._loaded_val_metrics = metrics
         print(
             f"Resumed from {path} (epoch {ckpt['epoch']}, "
             f"R2={metrics.get('r2', 'N/A')}, rho={metrics.get('mean_rho', 'N/A')})"

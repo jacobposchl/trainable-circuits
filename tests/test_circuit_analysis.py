@@ -97,14 +97,24 @@ def test_compute_class_purity_returns_zero_for_empty_selection():
     assert CircuitAnalyzer.compute_class_purity(pair_indices, labels, mask) == 0.0
 
 
-def test_load_checkpoint_restores_meta_encoder_and_info_loss(minimal_config, meta_encoder, info_loss, tmp_path):
+def test_load_checkpoint_restores_backbone_meta_encoder_and_info_loss(
+    minimal_config,
+    backbone,
+    meta_encoder,
+    info_loss,
+    tmp_path,
+):
     checkpoint_path = tmp_path / "checkpoint.pt"
     config = copy.deepcopy(minimal_config)
+    config["model"]["trainable_stem"] = True
+
+    backbone.model.conv1.weight.data.add_(0.1234)
 
     torch.save(
         {
             "epoch": 3,
             "val_metrics": {"r2": 0.8, "mean_rho": 0.7},
+            "backbone_state": backbone.state_dict(),
             "meta_encoder_state": meta_encoder.state_dict(),
             "info_loss_state": info_loss.state_dict(),
             "optimizer_state": {},
@@ -113,15 +123,17 @@ def test_load_checkpoint_restores_meta_encoder_and_info_loss(minimal_config, met
         checkpoint_path,
     )
 
-    _, loaded_meta_encoder, loaded_info_loss = load_checkpoint(
+    loaded_backbone, loaded_meta_encoder, loaded_info_loss = load_checkpoint(
         config,
         str(checkpoint_path),
         torch.device("cpu"),
     )
 
+    torch.testing.assert_close(loaded_backbone.model.conv1.weight, backbone.model.conv1.weight)
     for key, value in meta_encoder.state_dict().items():
         torch.testing.assert_close(loaded_meta_encoder.state_dict()[key], value)
     for key, value in info_loss.state_dict().items():
         torch.testing.assert_close(loaded_info_loss.state_dict()[key], value)
+    assert loaded_backbone.training is False
     assert loaded_meta_encoder.training is False
     assert loaded_info_loss.training is False
