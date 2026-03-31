@@ -86,41 +86,6 @@ def plot_per_layer_umap(
     return fig
 
 
-def plot_profile_heatmap(
-    profiles: np.ndarray,
-    labels: np.ndarray | None = None,
-    max_pairs: int = 500,
-) -> plt.Figure:
-    """
-    Heatmap of alignment profiles [N_pairs, L].
-
-    Args:
-        profiles:  [N_pairs, L] alignment profile vectors
-        labels:    optional [N_pairs] for sorting by class
-        max_pairs: max pairs to display
-
-    Returns:
-        matplotlib Figure
-    """
-    if profiles.shape[0] > max_pairs:
-        idx = np.random.choice(profiles.shape[0], max_pairs, replace=False)
-        profiles = profiles[idx]
-        if labels is not None:
-            labels = labels[idx]
-
-    if labels is not None:
-        sort_idx = np.argsort(labels)
-        profiles = profiles[sort_idx]
-
-    fig, ax = plt.subplots(figsize=(6, 8))
-    im = ax.imshow(profiles, aspect="auto", cmap="viridis", interpolation="nearest")
-    ax.set_xlabel("Layer")
-    ax.set_ylabel("Pair index")
-    ax.set_title("Alignment Profiles")
-    fig.colorbar(im, ax=ax, label="Cosine similarity")
-    fig.tight_layout()
-    return fig
-
 
 def plot_circuit_members(
     images: np.ndarray,
@@ -222,6 +187,72 @@ def plot_multi_circuit_histogram(
     ax.set_ylabel("Number of pairs")
     ax.set_title("Multi-Circuit Membership Distribution")
     ax.set_xticks(range(max_count + 1))
+    fig.tight_layout()
+    return fig
+
+
+def plot_span_heatmap(
+    circuits: list[dict],
+    n_layers: int,
+    metric: str = "elevation_sigma",
+    agg: str = "mean",
+) -> plt.Figure:
+    """
+    2-D heatmap of a circuit metric grouped by span (l_start, l_end).
+
+    Each cell at position (l_start, l_end) shows the aggregated value of
+    ``metric`` across all circuits found for that span.  Cells with no
+    circuits are left blank.  White numbers give the circuit count per cell.
+
+    Args:
+        circuits: list of circuit dicts from discover_all, each annotated
+                  with the chosen metric (e.g. after calling within_span_elevation
+                  and compute_class_purity).
+        n_layers: total number of backbone layers L.
+        metric:   key in each circuit dict to aggregate. Common values:
+                  'elevation_sigma', 'purity', 'size', 'span_len'.
+        agg:      aggregation over circuits sharing a span ('mean' or 'max').
+
+    Returns:
+        matplotlib Figure.
+    """
+    grid   = np.full((n_layers, n_layers), np.nan)
+    counts = np.zeros((n_layers, n_layers), dtype=int)
+    accum: dict = {}
+
+    for c in circuits:
+        val = c.get(metric)
+        if val is None:
+            continue
+        l_start, l_end = c["span"]
+        accum.setdefault((l_start, l_end), []).append(float(val))
+        counts[l_start, l_end] += 1
+
+    fn = np.mean if agg == "mean" else np.max
+    for (ls, le), vals in accum.items():
+        grid[ls, le] = float(fn(vals))
+
+    # Upper triangle (l_end >= l_start) is the valid span region
+    valid   = np.triu(np.ones((n_layers, n_layers), dtype=bool))
+    display = np.where(valid, grid, np.nan)
+
+    fig, ax = plt.subplots(figsize=(max(6, n_layers), max(5, n_layers - 1)))
+    im = ax.imshow(display, origin="upper", aspect="equal",
+                   cmap="viridis", interpolation="nearest")
+    fig.colorbar(im, ax=ax, label=metric.replace("_", " "))
+
+    for (r, c_), cnt in np.ndenumerate(counts):
+        if cnt > 0 and not np.isnan(display[r, c_]):
+            ax.text(c_, r, str(cnt), ha="center", va="center",
+                    fontsize=7, color="white", alpha=0.85)
+
+    ax.set_xlabel("l_end")
+    ax.set_ylabel("l_start")
+    ax.set_xticks(range(n_layers))
+    ax.set_yticks(range(n_layers))
+    ax.set_xticklabels([f"L{i+1}" for i in range(n_layers)], fontsize=8)
+    ax.set_yticklabels([f"L{i+1}" for i in range(n_layers)], fontsize=8)
+    ax.set_title(f"Circuit {metric.replace('_', ' ')} by Span ({agg})", fontsize=12)
     fig.tight_layout()
     return fig
 

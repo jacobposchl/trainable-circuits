@@ -17,9 +17,10 @@ Input x
     |
 [Frozen Backbone (ResNet18)]
     |
-h_l(x) --> GAP --> L2-normalize --> detach
+h_l(x) — AdaptiveMaxPool + Linear → L2-normalize → detach  (trajectory)
+f_l(x) — AdaptiveMaxPool + Linear → L2-normalize → detach  (flow targets, pre-skip)
     |
-[Per-layer projectors: Linear -> GELU -> LayerNorm]
+[Per-layer projectors: Linear → GELU → LayerNorm]
     |
 p_1, ..., p_L
     |
@@ -31,22 +32,21 @@ z_1, ..., z_L  (L2-normalized per-layer circuit representations)
 ## Training Objective
 
 ```
-L = L_info + lambda * L_geometry
+L = L_info
 ```
 
-- **L_info** (fidelity): MLP predicts per-layer cosine similarity from `z_l^a * z_l^b`
-- **L_geometry** (structure): soft contrastive loss using alignment profile as target distribution
+- **L_info** (fidelity): a per-layer MLP predicts the flow co-activation product `f_l^a ⊙ f_l^b` from `z_l^a * z_l^b`, minimizing a normalized (1 − R²) loss that is ~1.0 at initialization and approaches 0 at perfect reconstruction
 
-No class labels are used in training. The signal comes entirely from the backbone's internal alignment profiles.
+No class labels are used in training. The signal comes entirely from the backbone's internal flow targets.
 
 ## Circuit Discovery
 
-Post-training, circuits are discovered via **span-centric clustering**:
+Post-training, circuits are discovered via **span-centric, image-centric clustering**:
 
-1. Enumerate all `L(L+1)/2` contiguous spans `[l_start, l_end]`
-2. For each span: extract within-span profile sub-vector, apply temperature sharpening, cluster with HDBSCAN
-3. A pair can belong to circuits at multiple spans (multi-circuit membership)
-4. Canonical circuits = clusters with >1% of all pairs
+1. Enumerate all `L(L+1)/2` contiguous layer spans `[l_start, l_end]`
+2. For each span: concatenate per-image z-vectors across span layers, reduce with UMAP (cosine metric), cluster with HDBSCAN
+3. Canonical circuits = clusters containing 1%–40% of all images
+4. One image can belong to circuits at multiple spans (multi-circuit membership)
 
 ## Success Criteria
 
@@ -62,65 +62,96 @@ Post-training, circuits are discovered via **span-centric clustering**:
 
 ```
 models/
-  backbone.py          # Frozen backbone with configurable pooling
-  meta_encoder.py      # RoPE transformer, per-layer projectors, profile regressor
+  backbone.py          # Frozen backbone with dual hooks (trajectory + flow targets)
+  meta_encoder.py      # RoPE transformer, per-layer projectors, ProfileRegressor
 losses/
-  info_loss.py         # L_info: profile reconstruction fidelity
-  geometry_loss.py     # L_geometry: soft contrastive with profile targets
+  info_loss.py         # L_info: normalized flow co-activation reconstruction loss
 training/
   unified_trainer.py   # Phase 1 training loop
-  schedulers.py        # Lambda warmup scheduler
 evaluation/
   metrics.py           # 5 success criteria functions
-  discovery.py         # Span-centric circuit discovery pipeline
+  discovery.py         # Span-centric image-centric circuit discovery (UMAP + HDBSCAN)
   circuit_analysis.py  # Data collection and profile computation
-  circuit_viz.py       # UMAP, heatmaps, circuit visualizations
+  circuit_viz.py       # UMAP, circuit member grids, span coverage visualizations
 data/
   cifar.py             # CIFAR-10 data loading
 configs/
   phase1.yaml          # Main training config
-  ablations/           # Info-only, geometry-only, pooling ablations
+  ablations/
+    info_only.yaml     # Ablation: different checkpoint dir, same loss
 scripts/
-  train.py             # CLI training entry point
-  evaluate.py          # CLI evaluation entry point
+  train.py             # CLI training entry point (ctls-train)
+  evaluate.py          # CLI evaluation entry point (ctls-evaluate)
 notebooks/
-  experiments/         # Experiment notebooks (1-7)
+  experiments/         # Experiment notebooks nb00–nb07
 documents/
-  newest_iteration.md  # Detailed technical specification
+  project_context.md   # Detailed technical specification and design decisions
+  preliminary_results.md  # Results on earlier checkpoints
 tests/
   test_meta_encoder.py # RoPE, MetaEncoder, ProfileRegressor tests
-  test_losses.py       # InfoLoss, GeometryLoss tests
-  test_discovery.py    # Span enumeration, sharpening, discovery tests
+  test_losses.py       # InfoLoss tests
+  test_discovery.py    # Span enumeration, discovery pipeline tests
+```
+
+## Installation
+
+```bash
+# Clone the repository
+git clone <repo-url>
+cd model_interpretability
+
+# Install (editable, core deps only)
+pip install -e .
+
+# Install with ViT architecture support
+pip install -e ".[vit]"
+
+# Install with dev/test dependencies
+pip install -e ".[dev]"
 ```
 
 ## Quickstart
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Train the meta-encoder (installed entry point)
+ctls-train --config configs/phase1.yaml
 
-# Train the meta-encoder
+# Or run directly
 python scripts/train.py --config configs/phase1.yaml
 
-# Evaluate with success criteria
-python scripts/evaluate.py --config configs/phase1.yaml \
+# Resume from checkpoint
+ctls-train --config configs/phase1.yaml --resume experiments/phase1/epoch_50.pt
+
+# Evaluate with C1–C2 success criteria
+ctls-evaluate --config configs/phase1.yaml \
     --checkpoint experiments/phase1/best.pt
 
-# Run circuit discovery
-python scripts/evaluate.py --config configs/phase1.yaml \
+# Run circuit discovery (C3–C5)
+ctls-evaluate --config configs/phase1.yaml \
     --checkpoint experiments/phase1/best.pt --discover
 
-# Generate visualizations
-python scripts/evaluate.py --config configs/phase1.yaml \
+# Generate UMAP visualizations
+ctls-evaluate --config configs/phase1.yaml \
     --checkpoint experiments/phase1/best.pt --viz
+```
+
+## Using as a Library
+
+After `pip install -e .`, all subpackages are importable directly:
+
+```python
+from models import FrozenBackbone, MetaEncoder
+from losses import InfoLoss
+from training import Phase1Trainer
+from evaluation import CircuitAnalyzer, SpanCentricDiscovery
+from evaluation import profile_reconstruction_r2, geometric_consistency
 ```
 
 ## Validation Experiments
 
-1. **Profile Reconstruction Fidelity** — R² of MLP regressor + L_info/L_geometry ablations
+1. **Profile Reconstruction Fidelity** — R² of per-layer MLP regressors (info-only ablation)
 2. **Geometric Consistency** — Per-layer Spearman ρ + UMAP visualization
 3. **Circuit Discovery & Span Validation** — Span-centric clustering + multi-circuit membership
-4. **Pooling Strategy Ablation** — GAP vs max vs top-k
-5. **Temperature Sensitivity** — τ_geometry × τ_discovery grid search
-6. **Transfer Across Backbone Depth** — ResNet18/34/50
-7. **Dataset Generalization** — CIFAR-100, STL-10
+4. **Temperature Sensitivity** — UMAP n_neighbors and HDBSCAN min_cluster_size sweep
+5. **Transfer Across Backbone Depth** — ResNet18/34/50
+6. **Dataset Generalization** — CIFAR-100, STL-10

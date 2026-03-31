@@ -11,8 +11,7 @@ where for layer l:
 
 This normalized formulation is scale-invariant: it equals ~1.0 at initialization
 (predictor ≈ constant mean) and → 0 at perfect reconstruction, regardless of the
-absolute magnitude of the flow co-activation targets.  This keeps L_info on the
-same order as L_geometry (~5.5) so both losses contribute meaningfully to gradients.
+absolute magnitude of the flow co-activation targets.
 
 The target f_l^a ⊙ f_l^b is the element-wise product of the two compressed,
 L2-normalized flow vectors at layer l.  f_l(x) is derived from the non-skip

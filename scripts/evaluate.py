@@ -19,10 +19,6 @@ Examples:
 """
 
 import argparse
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
@@ -30,7 +26,8 @@ import yaml
 from pathlib import Path
 
 from models.backbone import FrozenBackbone
-from models.meta_encoder import MetaEncoder, ProfileRegressor
+from models.meta_encoder import MetaEncoder
+from losses.info_loss import InfoLoss
 from data.cifar import get_standard_loaders
 
 
@@ -54,12 +51,14 @@ def load_model(config: dict, checkpoint_path: str, device: torch.device):
     mcfg = config["model"]
     ecfg = mcfg["meta_encoder"]
     rcfg = mcfg.get("regressor", {})
+    fcfg = mcfg.get("flow_compression", {})
 
     backbone = FrozenBackbone(
         arch=mcfg["arch"],
         num_classes=mcfg.get("num_classes", 10),
         pretrained=mcfg.get("pretrained", True),
-        pool_mode=mcfg.get("pool_mode", "gap"),
+        grid_size=fcfg.get("grid_size", 4),
+        flow_dim=fcfg.get("flow_dim", 256),
     ).to(device)
 
     meta_encoder = MetaEncoder(
@@ -70,20 +69,21 @@ def load_model(config: dict, checkpoint_path: str, device: torch.device):
         dropout=ecfg.get("dropout", 0.0),
     ).to(device)
 
-    regressor = ProfileRegressor(
-        input_dim=ecfg.get("projection_dim", 128),
+    info_loss = InfoLoss(
+        layer_dims=backbone.layer_dims,
+        projection_dim=ecfg.get("projection_dim", 128),
         hidden_dim=rcfg.get("hidden_dim", 64),
     ).to(device)
 
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     meta_encoder.load_state_dict(ckpt["meta_encoder_state"])
-    regressor.load_state_dict(ckpt["regressor_state"])
+    info_loss.load_state_dict(ckpt["info_loss_state"])
     metrics = ckpt.get("val_metrics", {})
     r2_val = metrics.get("r2")
     r2_str = f"{r2_val:.4f}" if r2_val is not None else "N/A"
     print(f"Loaded: {checkpoint_path} (epoch {ckpt['epoch']}, R2={r2_str})")
 
-    return backbone, meta_encoder, regressor
+    return backbone, meta_encoder, info_loss
 
 
 def main():
@@ -95,9 +95,9 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     dcfg = config["data"]
 
-    backbone, meta_encoder, regressor = load_model(config, args.checkpoint, device)
+    backbone, meta_encoder, info_loss = load_model(config, args.checkpoint, device)
     meta_encoder.eval()
-    regressor.eval()
+    info_loss.eval()
 
     _, val_loader = get_standard_loaders(
         data_dir=dcfg.get("data_dir", "data/cifar10"),
@@ -150,7 +150,7 @@ def main():
         for l in range(L):
             z_a = z_list[l][idx_a]
             z_b = z_list[l][idx_b]
-            pred_l = regressor(z_a * z_b)
+            pred_l = info_loss.regressors[l](z_a * z_b)
             predicted.append(pred_l)
     predicted = torch.stack(predicted, dim=1).numpy()
     true_np = true_sims.numpy()

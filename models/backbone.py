@@ -7,7 +7,7 @@ Design:
     post-skip addition). Input to the MetaEncoder.
   - Flow targets F(x) = (f_1, ..., f_L): compressed bn2/bn3 outputs (pre-skip,
     pre-relu). Capture the pure block contribution isolated from accumulated
-    history. Reconstruction and geometry targets for InfoLoss and GeometryLoss.
+    history. Reconstruction targets for InfoLoss.
   - Compression: AdaptiveMaxPool2d(G, G) -> Flatten -> Linear(C*G*G, D_flow).
     Grid-based max pooling preserves spatially-local peak activations where the
     block is doing something circuit-relevant, rather than averaging them away.

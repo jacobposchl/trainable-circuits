@@ -1,11 +1,8 @@
-# Ablation: L_geometry only (no fidelity loss)
-# Tests whether geometry alone produces organized space but poor reconstruction.
-
 experiment:
-  name: ablation_geometry_only
+  name: resnet34
 
 model:
-  arch: resnet18
+  arch: resnet34
   num_classes: 10
   pretrained: true
 
@@ -29,7 +26,7 @@ training:
   info_loss_weight: 5.0
 
 data:
-  data_dir: data/cifar10
+  data_dir: data/cifar10    # overridden in notebooks to point at Drive
   batch_size: 256
   num_workers: 4
   augment: true
@@ -42,6 +39,6 @@ discovery:
   hdbscan_min_cluster_size: 5
 
 logging:
-  checkpoint_dir: experiments/ablations/geometry_only
+  checkpoint_dir: experiments/resnet34    # overridden in notebooks to point at Drive
   log_interval: 50
   save_every: 10

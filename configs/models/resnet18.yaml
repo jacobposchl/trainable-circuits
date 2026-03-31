@@ -1,0 +1,44 @@
+experiment:
+  name: resnet18
+
+model:
+  arch: resnet18
+  num_classes: 10
+  pretrained: true
+
+  flow_compression:
+    grid_size: 4
+    flow_dim: 256
+
+  meta_encoder:
+    projection_dim: 128
+    n_heads: 4
+    n_transformer_layers: 2
+    dropout: 0.0
+
+  regressor:
+    hidden_dim: 64
+
+training:
+  epochs: 100
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  info_loss_weight: 5.0
+
+data:
+  data_dir: data/cifar10    # overridden in notebooks to point at Drive
+  batch_size: 256
+  num_workers: 4
+  augment: true
+
+discovery:
+  umap_n_components: 15
+  umap_n_neighbors: 15
+  min_cluster_fraction: 0.01
+  max_cluster_fraction: 0.40
+  hdbscan_min_cluster_size: 5
+
+logging:
+  checkpoint_dir: experiments/resnet18    # overridden in notebooks to point at Drive
+  log_interval: 50
+  save_every: 10

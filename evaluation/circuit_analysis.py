@@ -219,3 +219,71 @@ class CircuitAnalyzer:
 
         counts = input_labels.bincount()
         return float(counts.max()) / len(input_labels)
+
+
+# --------------------------------------------------------------------------- #
+# Checkpoint loading
+# --------------------------------------------------------------------------- #
+
+def load_checkpoint(
+    config: dict,
+    checkpoint_path: str,
+    device: torch.device,
+):
+    """
+    Build FrozenBackbone, MetaEncoder, and InfoLoss from a config dict and
+    load weights from a checkpoint saved by Phase1Trainer.
+
+    Args:
+        config:          Parsed YAML config dict (same structure as phase1.yaml).
+        checkpoint_path: Path to a .pt checkpoint file.
+        device:          Target device for all models.
+
+    Returns:
+        (backbone, meta_encoder, info_loss) — all in eval mode on ``device``.
+    """
+    from models.backbone import FrozenBackbone
+    from models.meta_encoder import MetaEncoder
+    from losses.info_loss import InfoLoss
+
+    mcfg = config["model"]
+    ecfg = mcfg["meta_encoder"]
+    rcfg = mcfg.get("regressor", {})
+    fcfg = mcfg.get("flow_compression", {})
+
+    backbone = FrozenBackbone(
+        arch=mcfg["arch"],
+        num_classes=mcfg.get("num_classes", 10),
+        pretrained=mcfg.get("pretrained", True),
+        grid_size=fcfg.get("grid_size", 4),
+        flow_dim=fcfg.get("flow_dim", 256),
+    ).to(device)
+
+    meta_encoder = MetaEncoder(
+        layer_dims=backbone.layer_dims,
+        projection_dim=ecfg.get("projection_dim", 128),
+        n_heads=ecfg.get("n_heads", 4),
+        n_transformer_layers=ecfg.get("n_transformer_layers", 2),
+        dropout=ecfg.get("dropout", 0.0),
+    ).to(device)
+
+    info_loss = InfoLoss(
+        layer_dims=backbone.layer_dims,
+        projection_dim=ecfg.get("projection_dim", 128),
+        hidden_dim=rcfg.get("hidden_dim", 64),
+    ).to(device)
+
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    meta_encoder.load_state_dict(ckpt["meta_encoder_state"])
+    info_loss.load_state_dict(ckpt["info_loss_state"])
+
+    backbone.eval()
+    meta_encoder.eval()
+    info_loss.eval()
+
+    metrics = ckpt.get("val_metrics", {})
+    r2  = metrics.get("r2",        float("nan"))
+    rho = metrics.get("mean_rho",  float("nan"))
+    print(f"Loaded checkpoint: epoch {ckpt['epoch']},  R²={r2:.4f},  ρ={rho:.4f}")
+
+    return backbone, meta_encoder, info_loss

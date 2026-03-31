@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "circuit-interp"
+version = "0.1.0"
+description = "Self-supervised circuit discovery in frozen neural networks via meta-encoder learning"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.1.0",
+    "torchvision>=0.16.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "umap-learn>=0.5.4",
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "scikit-learn>=1.3.0",
+    "hdbscan>=0.8.33",
+    "pyyaml>=6.0",
+    "tqdm>=4.65.0",
+]
+
+[project.optional-dependencies]
+# ViT architectures require timm — install with: pip install -e ".[vit]"
+vit = ["timm>=0.9.0"]
+# Testing dependencies — install with: pip install -e ".[dev]"
+dev = ["pytest>=7.4.0"]
+
+[project.scripts]
+ctls-train    = "scripts.train:main"
+ctls-evaluate = "scripts.evaluate:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["models*", "losses*", "training*", "evaluation*", "data*", "scripts*"]
+exclude = ["tests*", "notebooks*", "documents*", "configs*"]
