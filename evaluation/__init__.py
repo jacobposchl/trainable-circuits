@@ -16,6 +16,7 @@ from evaluation.interventions import (
     forward_ctls_with_grad,
     run_intervention_batch,
     select_circuit_set,
+    select_intervention_images,
     summarize_intervention_results,
 )
 from evaluation.metrics import (
@@ -42,6 +43,7 @@ __all__ = [
     "build_control_prototypes",
     "compute_circuit_score",
     "select_circuit_set",
+    "select_intervention_images",
     "run_intervention_batch",
     "summarize_intervention_results",
     "profile_reconstruction_r2",

@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+from sklearn.metrics import roc_auc_score
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -36,6 +37,18 @@ class CircuitPrototype:
     associated_class: int | None = None
     associated_label: str | None = None
     source_cluster_id: int | None = None
+
+
+def _as_torch_layers(
+    z_list: list[np.ndarray] | list[torch.Tensor],
+) -> list[torch.Tensor]:
+    out = []
+    for layer in z_list:
+        if isinstance(layer, np.ndarray):
+            out.append(torch.from_numpy(layer).float())
+        else:
+            out.append(layer.float())
+    return out
 
 
 def _register_penultimate_hook(model: nn.Module, storage: list[torch.Tensor]):
@@ -353,6 +366,7 @@ def build_circuit_library(
 ) -> list[dict]:
     """Annotate discovered circuits with labels, purity, and prototypes."""
     labels_np = labels.numpy() if isinstance(labels, torch.Tensor) else np.asarray(labels)
+    z_layers = _as_torch_layers(z_list)
     library = []
 
     for idx, circuit in enumerate(circuits):
@@ -371,7 +385,7 @@ def build_circuit_library(
         name = f"{circuit_type}_{idx+1}_L{circuit['span'][0]+1}_L{circuit['span'][1]+1}"
         prototype = build_circuit_prototype(
             circuit,
-            z_list,
+            z_layers,
             name=name,
             circuit_type=circuit_type,
             associated_class=majority_class if circuit_type != "class_agnostic" else None,
@@ -379,6 +393,12 @@ def build_circuit_library(
             purity=purity,
             elevation_sigma=float(circuit.get("elevation_sigma", 0.0)),
         )
+        scores = compute_circuit_score(z_layers, prototype).cpu().numpy()
+        member_scores = scores[mask]
+        nonmember_scores = scores[~mask]
+        score_gap = float(member_scores.mean() - nonmember_scores.mean()) if len(nonmember_scores) else float("nan")
+        score_margin = float(member_scores.min() - nonmember_scores.mean()) if len(nonmember_scores) else float("nan")
+        auc = float(roc_auc_score(mask.astype(int), scores)) if mask.any() and (~mask).any() else float("nan")
 
         enriched = dict(circuit)
         enriched.update(
@@ -391,6 +411,11 @@ def build_circuit_library(
                 "purity": purity,
                 "circuit_type": circuit_type,
                 "prototype": prototype,
+                "mean_member_score": float(member_scores.mean()),
+                "mean_nonmember_score": float(nonmember_scores.mean()) if len(nonmember_scores) else float("nan"),
+                "score_gap": score_gap,
+                "score_margin": score_margin,
+                "score_auc": auc,
             }
         )
         library.append(enriched)
@@ -401,38 +426,64 @@ def build_circuit_library(
 def select_circuit_set(
     library: list[dict],
     *,
-    n_specific: int = 2,
-    n_agnostic: int = 2,
+    n_circuits: int = 2,
+    circuit_type: str = "class_specific",
     min_size: int = 20,
+    min_purity: float = 0.85,
+    max_purity: float = 1.0,
+    min_score_gap: float = 0.03,
+    min_score_auc: float = 0.70,
+    min_span_length: int = 2,
+    min_start_layer: int = 1,
+    distinct_classes: bool = True,
 ) -> list[dict]:
     """
-    Select a small mixed set of high-quality circuits for interventions.
+    Select high-quality circuits for interventions using discovery quality and
+    score-separation criteria.
     """
-    eligible = [c for c in library if c["size"] >= min_size]
-
-    specific = sorted(
-        [c for c in eligible if c["circuit_type"] == "class_specific"],
-        key=lambda c: (c.get("elevation_sigma", 0.0), c["purity"], c["size"]),
-        reverse=True,
-    )
-    agnostic = sorted(
-        [c for c in eligible if c["circuit_type"] == "class_agnostic"],
-        key=lambda c: (c.get("elevation_sigma", 0.0), c["size"]),
-        reverse=True,
-    )
+    eligible = []
+    for circuit in library:
+        span_len = circuit["span"][1] - circuit["span"][0] + 1
+        score_gap = float(circuit.get("score_gap", float("nan")))
+        score_auc = float(circuit.get("score_auc", float("nan")))
+        if circuit["size"] < min_size:
+            continue
+        if circuit["circuit_type"] != circuit_type:
+            continue
+        if not (min_purity <= circuit["purity"] <= max_purity):
+            continue
+        if span_len < min_span_length:
+            continue
+        if circuit["span"][0] < min_start_layer:
+            continue
+        if not np.isfinite(score_gap) or score_gap < min_score_gap:
+            continue
+        if not np.isfinite(score_auc) or score_auc < min_score_auc:
+            continue
+        eligible.append(circuit)
 
     chosen = []
     seen_classes = set()
-    for circuit in specific:
+    for circuit in sorted(
+        eligible,
+        key=lambda c: (
+            c.get("score_gap", 0.0),
+            c.get("score_auc", 0.0),
+            c.get("elevation_sigma", 0.0),
+            c["purity"],
+            c["size"],
+        ),
+        reverse=True,
+    ):
         cls = circuit.get("associated_class")
-        if cls in seen_classes:
+        if distinct_classes and cls in seen_classes:
             continue
         chosen.append(circuit)
-        seen_classes.add(cls)
-        if len([c for c in chosen if c["circuit_type"] == "class_specific"]) >= n_specific:
+        if cls is not None:
+            seen_classes.add(cls)
+        if len(chosen) >= n_circuits:
             break
 
-    chosen.extend(agnostic[:n_agnostic])
     return chosen
 
 
@@ -504,8 +555,16 @@ def build_control_prototypes(
 
     wrong_candidates = [
         c for c in library
-        if c["name"] != target["name"] and (c["span"][1] - c["span"][0] + 1) == span_len
+        if c["name"] != target["name"]
+        and (c["span"][1] - c["span"][0] + 1) == span_len
+        and c.get("associated_class") != target.get("associated_class")
     ]
+    if not wrong_candidates:
+        wrong_candidates = [
+            c for c in library
+            if c["name"] != target["name"]
+            and c.get("associated_class") != target.get("associated_class")
+        ]
     if not wrong_candidates:
         wrong_candidates = [c for c in library if c["name"] != target["name"]]
     wrong = max(
@@ -610,6 +669,8 @@ def run_intervention_batch(
     eps_pixels: float = 8.0 / 255.0,
     step_pixels: float = 2.0 / 255.0,
     n_steps: int = 10,
+    readout_class: int | None = None,
+    readout_label: str | None = None,
 ) -> dict:
     """
     Run a norm-bounded input-space intervention against a circuit score.
@@ -630,7 +691,7 @@ def run_intervention_batch(
     before_probe = probe(before["penultimate"])
     before_summary = summarize_probe_outputs(
         before_probe,
-        associated_class=prototype.associated_class,
+        associated_class=readout_class if readout_class is not None else prototype.associated_class,
     )
 
     intervened_images = optimize_images_for_score(
@@ -648,8 +709,11 @@ def run_intervention_batch(
     after_probe = probe(after["penultimate"])
     after_summary = summarize_probe_outputs(
         after_probe,
-        associated_class=prototype.associated_class,
+        associated_class=readout_class if readout_class is not None else prototype.associated_class,
     )
+
+    summary_class = readout_class if readout_class is not None else prototype.associated_class
+    summary_label = readout_label if readout_label is not None else prototype.associated_label
 
     summary = {
         "circuit_name": prototype.name,
@@ -664,11 +728,13 @@ def run_intervention_batch(
         "mean_entropy_before": before_summary["mean_entropy"],
         "mean_entropy_after": after_summary["mean_entropy"],
         "delta_entropy": after_summary["mean_entropy"] - before_summary["mean_entropy"],
-        "associated_class": prototype.associated_class,
-        "associated_label": prototype.associated_label,
+        "associated_class": summary_class,
+        "associated_label": summary_label,
+        "readout_class": summary_class,
+        "readout_label": summary_label,
     }
 
-    if prototype.associated_class is not None:
+    if summary_class is not None:
         summary.update(
             {
                 "mean_associated_logit_before": before_summary["mean_associated_logit"],
@@ -697,3 +763,51 @@ def run_intervention_batch(
 def summarize_intervention_results(results: list[dict]) -> list[dict]:
     """Flatten intervention outputs into a notebook-friendly table."""
     return [dict(result["summary"]) for result in results]
+
+
+def select_intervention_images(
+    z_list: list[torch.Tensor] | list[np.ndarray],
+    labels: torch.Tensor | np.ndarray,
+    prototype: CircuitPrototype,
+    *,
+    mode: str,
+    n_images: int,
+) -> torch.Tensor:
+    """
+    Pick held-out images that make the intervention question sharper.
+
+    - activation: low-score, non-associated-class images
+    - suppression: high-score, associated-class images when available
+    """
+    z_layers = _as_torch_layers(z_list)
+    scores = compute_circuit_score(z_layers, prototype).cpu()
+    labels_t = labels.cpu() if isinstance(labels, torch.Tensor) else torch.from_numpy(np.asarray(labels))
+
+    if mode == "activate":
+        candidate_mask = torch.ones_like(scores, dtype=torch.bool)
+        if prototype.associated_class is not None:
+            candidate_mask &= labels_t != prototype.associated_class
+        candidate_idx = torch.nonzero(candidate_mask, as_tuple=False).flatten()
+        ordered = candidate_idx[torch.argsort(scores[candidate_idx], descending=False)]
+    else:
+        candidate_mask = torch.ones_like(scores, dtype=torch.bool)
+        if prototype.associated_class is not None and (labels_t == prototype.associated_class).any():
+            candidate_mask &= labels_t == prototype.associated_class
+        candidate_idx = torch.nonzero(candidate_mask, as_tuple=False).flatten()
+        ordered = candidate_idx[torch.argsort(scores[candidate_idx], descending=True)]
+
+    if ordered.numel() < n_images:
+        fallback = torch.argsort(scores, descending=(mode == "suppress"))
+        ordered = torch.cat([ordered, fallback])
+
+    chosen = []
+    seen = set()
+    for idx in ordered.tolist():
+        if idx in seen:
+            continue
+        seen.add(idx)
+        chosen.append(idx)
+        if len(chosen) >= n_images:
+            break
+
+    return torch.tensor(chosen, dtype=torch.long)
