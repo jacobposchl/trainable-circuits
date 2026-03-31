@@ -67,8 +67,9 @@ Training objective: `L_total = info_loss_weight * L_info`
 | `metrics.py` | C1–C5 success criteria: `profile_reconstruction_r2`, `rich_profile_reconstruction_r2`, `geometric_consistency`, `within_span_elevation`, `circuit_diversity`, `class_purity_distribution`. |
 | `discovery.py` | `SpanCentricDiscovery`: enumerates layer spans, embeds with UMAP (cosine, 15 components), clusters with HDBSCAN, filters canonical circuits (1%–40% of images). Also `compute_span_similarities`, `compute_class_purity`, `multi_circuit_membership`, `compute_prototypes`. |
 | `circuit_analysis.py` | `CircuitAnalyzer`: batch-collects trajectories/flows/z-vectors/labels/images. `compute_pair_profiles`, `compute_pair_rich_profiles`, `compute_all_profiles`, `compute_class_purity`. `load_checkpoint(config, path, device)` builds all models and loads weights. |
+| `interventions.py` | Causal evaluation helpers: grad-enabled CTLS forward pass, frozen-feature linear probes, circuit prototype construction, control generation, circuit selection, and PGD-style input-space interventions with summary metrics. |
 | `circuit_viz.py` | `plot_per_layer_umap`, `plot_circuit_members`, `plot_span_coverage`, `plot_span_heatmap`, `plot_multi_circuit_histogram`. |
-| `__init__.py` | Exports: `CircuitAnalyzer`, `load_checkpoint`, `SpanCentricDiscovery`, `plot_per_layer_umap`, `plot_span_coverage`, `plot_span_heatmap`, and all 5 metric functions. |
+| `__init__.py` | Exports: `CircuitAnalyzer`, `load_checkpoint`, `SpanCentricDiscovery`, plotting helpers, C1?C5 metrics, and the notebook-facing causal intervention utilities. |
 
 ### `scripts/`
 
@@ -104,6 +105,7 @@ Training objective: `L_total = info_loss_weight * L_info`
 | `test_meta_encoder.py` | Tests `RotaryPositionEmbedding`, `RoPEMultiHeadAttention`, `MetaEncoder`, `ProfileRegressor`. |
 | `test_losses.py` | Tests `InfoLoss`. |
 | `test_discovery.py` | Tests `SpanCentricDiscovery`. |
+| `test_interventions.py` | Tests grad-enabled forward passes, linear-probe fitting, circuit prototype/control utilities, and intervention optimization behavior. |
 
 ### `documents/`
 
