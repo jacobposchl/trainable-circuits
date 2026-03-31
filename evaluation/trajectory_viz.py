@@ -23,6 +23,7 @@ meta-encoder simultaneously:
 Typical usage
 -------------
   from evaluation import precompute_circuit_flow, animate_trajectory
+
   from evaluation.circuit_analysis import CircuitAnalyzer, load_checkpoint
   from IPython.display import HTML
 
@@ -36,8 +37,6 @@ Typical usage
   HTML(anim.to_jshtml())
 """
 from __future__ import annotations
-
-from typing import Any
 
 import numpy as np
 import torch
@@ -213,47 +212,6 @@ def precompute_circuit_flow(
     }
 
 
-def fit_trajectory_umap(
-    z_list: list[torch.Tensor],
-    n_neighbors: int = 15,
-    random_state: int = 42,
-) -> tuple[np.ndarray, Any]:
-    """
-    Fit a single global UMAP over all (image, layer) points.
-
-    Stacks all L layers into one [N*L, d] matrix and fits one 2-D UMAP.
-    Useful for standalone analysis; the main animation uses
-    ``precompute_circuit_flow`` instead.
-
-    Returns:
-        coords:  [N, L, 2] float32
-        reducer: fitted ``umap.UMAP`` object
-    """
-    try:
-        import umap as umap_lib
-    except ImportError:
-        raise ImportError("Install umap-learn:  pip install umap-learn")
-
-    L = len(z_list)
-    N = z_list[0].shape[0]
-
-    stacked = np.concatenate([
-        z.numpy() if isinstance(z, torch.Tensor) else np.asarray(z)
-        for z in z_list
-    ], axis=0)
-
-    reducer = umap_lib.UMAP(
-        n_components=2,
-        n_neighbors=n_neighbors,
-        metric="cosine",
-        random_state=random_state,
-        low_memory=False,
-    )
-    embedded = reducer.fit_transform(stacked)
-    coords   = embedded.reshape(L, N, 2).transpose(1, 0, 2)
-    return coords.astype(np.float32), reducer
-
-
 # --------------------------------------------------------------------------- #
 # Main animation entry point
 # --------------------------------------------------------------------------- #
@@ -353,7 +311,7 @@ def _make_figure(
     Returns:
         (fig, ax_3d, ax_flow, ax_softmax)
     """
-    fig = plt.figure(figsize=(11.9, 8.5), dpi=dpi, facecolor=_BG)
+    fig = plt.figure(figsize=(6.0, 4.3), dpi=dpi, facecolor=_BG)
 
     gs = gridspec.GridSpec(
         3, 2,

@@ -29,7 +29,6 @@ from evaluation.metrics import (
 from evaluation.trajectory_viz import (
     animate_trajectory,
     collect_raw_activations,
-    fit_trajectory_umap,
     get_softmax_probs,
     precompute_circuit_flow,
 )
@@ -60,7 +59,6 @@ __all__ = [
     "class_purity_distribution",
     "animate_trajectory",
     "collect_raw_activations",
-    "fit_trajectory_umap",
     "get_softmax_probs",
     "precompute_circuit_flow",
 ]
