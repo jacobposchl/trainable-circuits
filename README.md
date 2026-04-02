@@ -1,157 +1,114 @@
-# Phase 1: Meta-Encoder Validation
+# Flow Circuits
 
-A self-supervised framework for learning interpretable representations of neural network computational structure. The meta-encoder reads a frozen backbone's activation trajectories and maps them into a **circuit space** where geometric proximity reflects shared internal computation.
+`flow-circuits` is a mechanistic-interpretability research codebase for discovering candidate circuits in frozen ResNets using a flow-based spatial-token analysis model.
 
-## Core Idea
+The supported workflow is:
 
-Neural networks reuse recurring computational pathways — stable patterns of activation across contiguous layers. We call these **circuits**. The meta-encoder learns per-layer representations `z_1, ..., z_L` such that:
+1. train a flow-based meta-encoder on frozen backbone observations
+2. evaluate predictive and geometric representation metrics
+3. discover candidate circuits on the held-out discovery split
+4. validate candidate circuits with held-out residual-patch interventions
 
-- Inputs processed similarly by the backbone at a given layer are close in z-space at that layer
-- The layer-by-layer structure of z-space reveals *where* in the network similarity occurs
-- Discovered circuits span identifiable, contiguous depth ranges
+`flow_circuits/` is the only supported code path in this repository.
 
-## Architecture
+## Current Project
 
-```
-Input x
-    |
-[Frozen Backbone (ResNet18)]
-    |
-h_l(x) — AdaptiveMaxPool + Linear → L2-normalize → detach  (trajectory)
-f_l(x) — AdaptiveMaxPool + Linear → L2-normalize → detach  (flow targets, pre-skip)
-    |
-[Per-layer projectors: Linear → GELU → LayerNorm]
-    |
-p_1, ..., p_L
-    |
-[RoPE Transformer Encoder]
-    |
-z_1, ..., z_L  (L2-normalized per-layer circuit representations)
-```
+The current iteration follows the theory and methodology in [documents/project_context.md](documents/project_context.md). The project treats a residual network as a flow system:
 
-## Training Objective
+- token inputs come from post-skip state maps
+- prediction targets come from pre-skip residual contributions
+- external future descriptors are built from frozen backbone flow targets
+- discovery is node-wise and image-set based, not span-centric
+- causal validation uses residual-patch ablations, not input-space optimization
 
-```
-L = L_info
-```
+Older code paths were removed from the tracked repo so the public surface matches the current project.
 
-- **L_info** (fidelity): a per-layer MLP predicts the flow co-activation product `f_l^a ⊙ f_l^b` from `z_l^a * z_l^b`, minimizing a normalized (1 − R²) loss that is ~1.0 at initialization and approaches 0 at perfect reconstruction
+## Supported Surface
 
-No class labels are used in training. The signal comes entirely from the backbone's internal flow targets.
+- Package: `flow_circuits`
+- CLIs: `flow-train`, `flow-evaluate`, `flow-discover`, `flow-intervene`
+- Configs: `configs/flow/*.yaml`
+- Backbones: `resnet18`, `resnet34`, `resnet50`
+- Dataset protocol: CIFAR-10 with deterministic `40k fit / 5k val / 5k discovery / 10k test`
 
-## Circuit Discovery
-
-Post-training, circuits are discovered via **span-centric, image-centric clustering**:
-
-1. Enumerate all `L(L+1)/2` contiguous layer spans `[l_start, l_end]`
-2. For each span: concatenate per-image z-vectors across span layers, reduce with UMAP (cosine metric), cluster with HDBSCAN
-3. Canonical circuits = clusters containing 1%–40% of all images
-4. One image can belong to circuits at multiple spans (multi-circuit membership)
-
-## Success Criteria
-
-| # | Criterion | Target |
-|---|-----------|--------|
-| 1 | Profile Reconstruction R² | >= 0.7 |
-| 2 | Geometric Consistency (Spearman ρ) | > 0.5/layer, > 0.65 mean |
-| 3 | Within-Span Similarity Elevation | cluster mean > pop mean + 1σ |
-| 4 | Circuit Diversity | >= 60% layer coverage |
-| 5 | Class Purity Distribution | bimodal (agnostic + specific) |
-
-## Repository Structure
-
-```
-models/
-  backbone.py          # Frozen backbone with dual hooks (trajectory + flow targets)
-  meta_encoder.py      # RoPE transformer, per-layer projectors, ProfileRegressor
-losses/
-  info_loss.py         # L_info: normalized flow co-activation reconstruction loss
-training/
-  unified_trainer.py   # Phase 1 training loop
-evaluation/
-  metrics.py           # 5 success criteria functions
-  discovery.py         # Span-centric image-centric circuit discovery (UMAP + HDBSCAN)
-  circuit_analysis.py  # Data collection and profile computation
-  circuit_viz.py       # UMAP, circuit member grids, span coverage visualizations
-data/
-  cifar.py             # CIFAR-10 data loading
-configs/
-  phase1.yaml          # Main training config
-  ablations/
-    info_only.yaml     # Ablation: different checkpoint dir, same loss
-scripts/
-  train.py             # CLI training entry point (ctls-train)
-  evaluate.py          # CLI evaluation entry point (ctls-evaluate)
-notebooks/
-  experiments/         # Experiment notebooks nb00–nb07
-documents/
-  project_context.md   # Detailed technical specification and design decisions
-  preliminary_results.md  # Results on earlier checkpoints
-tests/
-  test_meta_encoder.py # RoPE, MetaEncoder, ProfileRegressor tests
-  test_losses.py       # InfoLoss tests
-  test_discovery.py    # Span enumeration, discovery pipeline tests
-```
-
-## Installation
+## Install
 
 ```bash
-# Clone the repository
-git clone <repo-url>
-cd model_interpretability
-
-# Install (editable, core deps only)
 pip install -e .
-
-# Install with ViT architecture support
-pip install -e ".[vit]"
-
-# Install with dev/test dependencies
 pip install -e ".[dev]"
 ```
 
 ## Quickstart
 
+Train a base model:
+
 ```bash
-# Train the meta-encoder (installed entry point)
-ctls-train --config configs/phase1.yaml
-
-# Or run directly
-python scripts/train.py --config configs/phase1.yaml
-
-# Resume from checkpoint
-ctls-train --config configs/phase1.yaml --resume experiments/phase1/epoch_50.pt
-
-# Evaluate with C1–C2 success criteria
-ctls-evaluate --config configs/phase1.yaml \
-    --checkpoint experiments/phase1/best.pt
-
-# Run circuit discovery (C3–C5)
-ctls-evaluate --config configs/phase1.yaml \
-    --checkpoint experiments/phase1/best.pt --discover
-
-# Generate UMAP visualizations
-ctls-evaluate --config configs/phase1.yaml \
-    --checkpoint experiments/phase1/best.pt --viz
+flow-train --config configs/flow/resnet18_base.yaml
 ```
 
-## Using as a Library
+Evaluate representation metrics and baseline comparison:
 
-After `pip install -e .`, all subpackages are importable directly:
-
-```python
-from models import FrozenBackbone, MetaEncoder
-from losses import InfoLoss
-from training import Phase1Trainer
-from evaluation import CircuitAnalyzer, SpanCentricDiscovery
-from evaluation import profile_reconstruction_r2, geometric_consistency
+```bash
+flow-evaluate --checkpoint experiments/flow/resnet18_base/final.pt
 ```
 
-## Validation Experiments
+Discover candidate circuits:
 
-1. **Profile Reconstruction Fidelity** — R² of per-layer MLP regressors (info-only ablation)
-2. **Geometric Consistency** — Per-layer Spearman ρ + UMAP visualization
-3. **Circuit Discovery & Span Validation** — Span-centric clustering + multi-circuit membership
-4. **Temperature Sensitivity** — UMAP n_neighbors and HDBSCAN min_cluster_size sweep
-5. **Transfer Across Backbone Depth** — ResNet18/34/50
-6. **Dataset Generalization** — CIFAR-100, STL-10
+```bash
+flow-discover --checkpoint experiments/flow/resnet18_base/final.pt
+```
+
+Run held-out interventions:
+
+```bash
+flow-intervene \
+  --checkpoint experiments/flow/resnet18_base/final.pt \
+  --circuits experiments/flow/resnet18_base/candidate_circuits.json
+```
+
+## Artifact Contract
+
+The repo now standardizes four artifact types:
+
+- Training checkpoints: versioned `.pt` files containing config, phase metadata, model state, optimizer state, scheduler state, and validation summaries.
+- Evaluation summary: JSON from `flow-evaluate` containing representation metrics and baseline comparison.
+- Candidate-circuit artifact: JSON from `flow-discover` containing discovery metadata, retained node clusters, candidate circuits, centroids, thresholds, and stability stats.
+- Intervention summary: JSON and CSV from `flow-intervene` containing per-circuit member/control effects and corrected significance values.
+
+## Notebook Workflow
+
+The first-class notebook suite is:
+
+- [notebooks/nb01_training_and_representation_metrics.ipynb](notebooks/nb01_training_and_representation_metrics.ipynb)
+- [notebooks/nb02_candidate_circuit_discovery_and_stability.ipynb](notebooks/nb02_candidate_circuit_discovery_and_stability.ipynb)
+- [notebooks/nb03_interventions_and_qualitative_analysis.ipynb](notebooks/nb03_interventions_and_qualitative_analysis.ipynb)
+
+Each notebook is Colab-ready: the setup cell clones or updates this GitHub repo under `/content/model_interpretability`, installs the package, mounts Google Drive, and stores checkpoints plus derived artifacts under `MyDrive/flow_circuits/`.
+
+Use [documents/experiment_guide.md](documents/experiment_guide.md) for the operational workflow that connects configs, CLIs, notebooks, and saved artifacts.
+
+## Repository Layout
+
+```text
+flow_circuits/
+  backbones/
+  tokenization/
+  encoders/
+  objectives/
+  training/
+  discovery/
+  evaluation/
+  interventions/
+  data/
+  cli/
+configs/flow/
+documents/
+notebooks/
+tests/
+```
+
+## Notes
+
+- `documents/project_context.md` is the theory/spec document.
+- `documents/experiment_guide.md` is the operational experiment guide.
+- Notebook cells are written against the current `flow_circuits` surface and the `flow-*` CLI workflow only.

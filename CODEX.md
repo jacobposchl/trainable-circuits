@@ -1,0 +1,12 @@
+# Codex Entry Point
+
+Use [`AGENTS.md`](C:/Users/Jacob%20Poschl/Desktop/model_interpretability/AGENTS.md) as the canonical shared agent guide for this repository.
+
+Recommended read order:
+
+1. [`AGENTS.md`](C:/Users/Jacob%20Poschl/Desktop/model_interpretability/AGENTS.md)
+2. [`documents/project_context.md`](C:/Users/Jacob%20Poschl/Desktop/model_interpretability/documents/project_context.md)
+3. [`documents/experiment_guide.md`](C:/Users/Jacob%20Poschl/Desktop/model_interpretability/documents/experiment_guide.md)
+4. [`documents/repo_structure.md`](C:/Users/Jacob%20Poschl/Desktop/model_interpretability/documents/repo_structure.md)
+
+Treat this file as a pointer only. Shared project truth lives in `AGENTS.md` and the linked documents above.

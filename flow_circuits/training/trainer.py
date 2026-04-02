@@ -1,0 +1,489 @@
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+import yaml
+
+from flow_circuits.backbones import FrozenResNetObserver
+from flow_circuits.data import build_cifar10_splits
+from flow_circuits.encoders import SpatiotemporalEncoder
+from flow_circuits.evaluation import RepresentationMetrics, evaluate_representation_metrics
+from flow_circuits.objectives import FlowObjective
+from flow_circuits.tokenization import FlowTokenizer
+from flow_circuits.training.baselines import BaselineRegressors
+
+
+@dataclass
+class LoadedFlowComponents:
+    observer: FrozenResNetObserver
+    tokenizer: FlowTokenizer
+    encoder: SpatiotemporalEncoder
+    objective: FlowObjective
+    config: dict
+    checkpoint: dict
+
+
+def build_components(config: dict, device: torch.device) -> LoadedFlowComponents:
+    bcfg = config["backbone"]
+    tcfg = config["tokenization"]
+    ecfg = config["encoder"]
+    ocfg = config["objectives"]
+
+    observer = FrozenResNetObserver(
+        arch=bcfg["arch"],
+        pretrained=bcfg.get("pretrained", True),
+        num_classes=bcfg.get("num_classes", 10),
+        grid_size=tcfg.get("grid_size", 4),
+        weights_path=bcfg.get("weights_path"),
+    ).to(device)
+    tokenizer = FlowTokenizer(
+        layer_channels=observer.layer_channels,
+        token_dim=tcfg.get("token_dim", 128),
+        flow_dim=tcfg.get("flow_dim", 256),
+        traj_dim=tcfg.get("traj_dim", 256),
+        grid_size=tcfg.get("grid_size", 4),
+        eps=tcfg.get("eps", 1.0e-6),
+    ).to(device)
+    encoder = SpatiotemporalEncoder(
+        n_layers=len(observer.layer_channels),
+        grid_size=tcfg.get("grid_size", 4),
+        token_dim=tcfg.get("token_dim", 128),
+        n_heads=ecfg.get("n_heads", 4),
+        n_transformer_layers=ecfg.get("n_transformer_layers", 2),
+        mlp_dim=ecfg.get("mlp_dim"),
+        dropout=ecfg.get("dropout", 0.0),
+    ).to(device)
+    objective = FlowObjective(
+        n_layers=len(observer.layer_channels),
+        token_dim=tcfg.get("token_dim", 128),
+        flow_dim=tcfg.get("flow_dim", 256),
+        pred_hidden_dim=ocfg.get("pred_hidden_dim"),
+        rec_hidden_dim=ocfg.get("rec_hidden_dim"),
+    ).to(device)
+    return LoadedFlowComponents(
+        observer=observer,
+        tokenizer=tokenizer,
+        encoder=encoder,
+        objective=objective,
+        config=config,
+        checkpoint={},
+    )
+
+
+def load_components_from_checkpoint(
+    checkpoint_path: str | Path,
+    device: torch.device,
+) -> LoadedFlowComponents:
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    config = checkpoint["config"]
+    components = build_components(config, device)
+    components.observer.load_state_dict(checkpoint["observer_state"])
+    components.tokenizer.load_state_dict(checkpoint["tokenizer_state"])
+    components.encoder.load_state_dict(checkpoint["encoder_state"])
+    components.objective.load_state_dict(checkpoint["objective_state"])
+    components.checkpoint = checkpoint
+    components.observer.eval()
+    components.tokenizer.eval()
+    components.encoder.eval()
+    components.objective.eval()
+    return components
+
+
+def collect_model_outputs(
+    components: LoadedFlowComponents,
+    loader,
+    *,
+    device: torch.device,
+    max_images: int | None = None,
+) -> dict[str, torch.Tensor]:
+    outputs = {
+        "z": [],
+        "flow_targets": [],
+        "future_descriptors": [],
+        "predicted_next": [],
+        "reconstructed_current": [],
+        "images": [],
+        "logits": [],
+        "labels": [],
+        "indices": [],
+    }
+    seen = 0
+    with torch.no_grad():
+        for images, labels, indices in loader:
+            device_images = images.to(device)
+            tokenized, z, objective_output = _forward_pass(components, device_images, lambda_rec=1.0, lambda_traj=0.0)
+            outputs["z"].append(z.cpu())
+            outputs["flow_targets"].append(tokenized.flow_targets.cpu())
+            outputs["future_descriptors"].append(tokenized.future_descriptors.cpu())
+            outputs["predicted_next"].append(objective_output.predicted_next.cpu())
+            outputs["reconstructed_current"].append(objective_output.reconstructed_current.cpu())
+            outputs["images"].append(images.cpu())
+            with torch.no_grad():
+                outputs["logits"].append(components.observer.model(device_images).cpu())
+            outputs["labels"].append(labels.cpu())
+            outputs["indices"].append(indices.cpu())
+            seen += device_images.shape[0]
+            if max_images is not None and seen >= max_images:
+                break
+
+    for key, value in outputs.items():
+        if not value:
+            continue
+        outputs[key] = torch.cat(value, dim=0)
+        if max_images is not None:
+            outputs[key] = outputs[key][:max_images]
+    return outputs
+
+
+class FlowCircuitTrainer:
+    def __init__(self, config: dict) -> None:
+        self.config = config
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.components = build_components(config, self.device)
+        self.loaders = build_cifar10_splits(
+            data_dir=config["data"]["data_dir"],
+            batch_size=config["data"]["batch_size"],
+            num_workers=config["data"].get("num_workers", 4),
+            seed=config["data"].get("seed", 0),
+            augment_fit=config["data"].get("augment_fit", True),
+            download=config["data"].get("download", True),
+        )
+        self.checkpoint_dir = Path(config["logging"]["checkpoint_dir"])
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        train_params = list(self.components.tokenizer.parameters())
+        train_params += list(self.components.encoder.parameters())
+        train_params += list(self.components.objective.parameters())
+        self.optimizer = AdamW(
+            train_params,
+            lr=config["training"].get("lr", 1.0e-3),
+            weight_decay=config["training"].get("weight_decay", 1.0e-4),
+        )
+        total_epochs = sum(config["training"]["phase_epochs"].values())
+        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(total_epochs, 1))
+
+    def train(self) -> dict:
+        history = []
+        phase_epochs = self.config["training"]["phase_epochs"]
+        objectives = self.config["objectives"]
+
+        history.extend(self._run_phase("phase_a", phase_epochs.get("phase_a", 0), lambda_rec=0.0, lambda_traj=0.0))
+        history.extend(
+            self._run_phase(
+                "phase_b",
+                phase_epochs.get("phase_b", 0),
+                lambda_rec=objectives.get("lambda_rec", 0.2),
+                lambda_traj=0.0,
+            )
+        )
+        phase_b_metrics = self._full_validation_metrics(self.loaders["val"])
+        self._save_checkpoint(
+            name="phase_b.pt",
+            phase="phase_b",
+            validation=phase_b_metrics.to_dict(),
+        )
+
+        mode = self.config["experiment"].get("mode", "base")
+        final_phase = "phase_b"
+        final_metrics = phase_b_metrics
+        phase_c_summary = None
+
+        if mode == "aligned" and phase_epochs.get("phase_c", 0) > 0:
+            baseline_regressors = self._fit_baselines()
+            baseline_metrics = self._evaluate_baselines(baseline_regressors)
+            if phase_b_metrics.prediction_cosine_mean > baseline_metrics.best_baseline:
+                phase_b_snapshot = self._snapshot_state()
+                phase_c_result = self._run_phase_c_sweep(
+                phase_b_snapshot=phase_b_snapshot,
+                phase_b_metrics=phase_b_metrics,
+                epochs=phase_epochs["phase_c"],
+            )
+                phase_c_summary = phase_c_result
+                if phase_c_result["accepted"]:
+                    final_phase = "phase_c"
+                    final_metrics = phase_c_result["metrics"]
+            else:
+                phase_c_summary = {
+                    "accepted": False,
+                    "reason": "phase_b_prediction_not_above_best_baseline",
+                    "baseline_metrics": baseline_metrics.to_dict(),
+                }
+
+        summary = {
+            "history": history,
+            "final_phase": final_phase,
+            "final_metrics": final_metrics.to_dict(),
+            "phase_c": phase_c_summary,
+        }
+        self._save_checkpoint(
+            name="final.pt",
+            phase=final_phase,
+            validation=summary["final_metrics"],
+            extra_summary=summary,
+        )
+        return summary
+
+    def _run_phase(self, phase: str, epochs: int, *, lambda_rec: float, lambda_traj: float) -> list[dict]:
+        results = []
+        for epoch_idx in range(epochs):
+            train_metrics = self._run_epoch(
+                loader=self.loaders["fit"],
+                train=True,
+                lambda_rec=lambda_rec,
+                lambda_traj=lambda_traj,
+            )
+            val_metrics = self._run_epoch(
+                loader=self.loaders["val"],
+                train=False,
+                lambda_rec=lambda_rec,
+                lambda_traj=lambda_traj,
+            )
+            self.scheduler.step()
+            result = {
+                "phase": phase,
+                "epoch_in_phase": epoch_idx + 1,
+                "train": train_metrics,
+                "val": val_metrics,
+            }
+            results.append(result)
+        return results
+
+    def _run_epoch(
+        self,
+        *,
+        loader,
+        train: bool,
+        lambda_rec: float,
+        lambda_traj: float,
+    ) -> dict:
+        self.components.tokenizer.train(train)
+        self.components.encoder.train(train)
+        self.components.objective.train(train)
+        aggregate = {
+            "loss": 0.0,
+            "pred_loss": 0.0,
+            "rec_loss": 0.0,
+            "traj_loss": 0.0,
+            "prediction_cosine": 0.0,
+            "reconstruction_cosine": 0.0,
+        }
+        n_batches = 0
+        for images, _, _ in loader:
+            images = images.to(self.device)
+            if train:
+                self.optimizer.zero_grad()
+            tokenized, _, objective_output = _forward_pass(
+                self.components,
+                images,
+                lambda_rec=lambda_rec,
+                lambda_traj=lambda_traj,
+                traj_topk=self.config["objectives"].get("traj_topk", 8),
+                traj_gamma=self.config["objectives"].get("traj_gamma", 0.2),
+                traj_tau=self.config["objectives"].get("traj_tau", 0.1),
+            )
+            if train:
+                objective_output.total_loss.backward()
+                nn.utils.clip_grad_norm_(
+                    list(self.components.tokenizer.parameters())
+                    + list(self.components.encoder.parameters())
+                    + list(self.components.objective.parameters()),
+                    max_norm=self.config["training"].get("grad_clip", 1.0),
+                )
+                self.optimizer.step()
+
+            aggregate["loss"] += float(objective_output.total_loss.item())
+            aggregate["pred_loss"] += float(objective_output.pred_loss.item())
+            aggregate["rec_loss"] += float(objective_output.rec_loss.item())
+            aggregate["traj_loss"] += float(objective_output.traj_loss.item())
+            aggregate["prediction_cosine"] += float(objective_output.prediction_cosine.item())
+            aggregate["reconstruction_cosine"] += float(objective_output.reconstruction_cosine.item())
+            n_batches += 1
+        if n_batches == 0:
+            return aggregate
+        return {key: value / n_batches for key, value in aggregate.items()}
+
+    def _fit_baselines(self) -> BaselineRegressors:
+        max_images = self.config["training"].get("baseline_fit_images", 1024)
+        local_features, flow_features, next_targets = self._collect_baseline_features(self.loaders["fit"], max_images=max_images)
+        return BaselineRegressors.fit(
+            local_features=local_features,
+            flow_features=flow_features,
+            next_targets=next_targets,
+            alpha=self.config["training"].get("baseline_ridge_alpha", 1.0),
+        )
+
+    def _evaluate_baselines(self, regressors: BaselineRegressors):
+        max_images = self.config["training"].get("baseline_eval_images", 1024)
+        local_features, flow_features, next_targets = self._collect_baseline_features(self.loaders["val"], max_images=max_images)
+        return regressors.evaluate(
+            local_features=local_features,
+            flow_features=flow_features,
+            next_targets=next_targets,
+        )
+
+    def _collect_baseline_features(self, loader, *, max_images: int) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+        locals_by_layer: list[list[np.ndarray]] | None = None
+        flows_by_layer: list[list[np.ndarray]] | None = None
+        next_by_layer: list[list[np.ndarray]] | None = None
+        seen = 0
+        with torch.no_grad():
+            for images, _, _ in loader:
+                images = images.to(self.device)
+                observations = self.components.observer(images)
+                tokenized = self.components.tokenizer(observations)
+                if locals_by_layer is None:
+                    locals_by_layer = [[] for _ in range(tokenized.flow_targets.shape[1] - 1)]
+                    flows_by_layer = [[] for _ in range(tokenized.flow_targets.shape[1] - 1)]
+                    next_by_layer = [[] for _ in range(tokenized.flow_targets.shape[1] - 1)]
+                for layer_idx in range(tokenized.flow_targets.shape[1] - 1):
+                    locals_by_layer[layer_idx].append(
+                        tokenized.local_features[layer_idx].reshape(-1, tokenized.local_features[layer_idx].shape[-1]).cpu().numpy()
+                    )
+                    flows_by_layer[layer_idx].append(
+                        tokenized.flow_targets[:, layer_idx].reshape(-1, tokenized.flow_targets.shape[-1]).cpu().numpy()
+                    )
+                    next_by_layer[layer_idx].append(
+                        tokenized.flow_targets[:, layer_idx + 1].reshape(-1, tokenized.flow_targets.shape[-1]).cpu().numpy()
+                    )
+                seen += images.shape[0]
+                if seen >= max_images:
+                    break
+        return (
+            [np.concatenate(values, axis=0) for values in locals_by_layer or []],
+            [np.concatenate(values, axis=0) for values in flows_by_layer or []],
+            [np.concatenate(values, axis=0) for values in next_by_layer or []],
+        )
+
+    def _full_validation_metrics(self, loader) -> RepresentationMetrics:
+        outputs = collect_model_outputs(
+            self.components,
+            loader,
+            device=self.device,
+            max_images=self.config["training"].get("validation_images", 512),
+        )
+        return evaluate_representation_metrics(
+            outputs["z"],
+            outputs["flow_targets"],
+            outputs["future_descriptors"],
+            outputs["predicted_next"],
+            outputs["reconstructed_current"],
+            max_alignment_pairs=self.config["training"].get("alignment_max_pairs", 2048),
+        )
+
+    def _run_phase_c_sweep(self, *, phase_b_snapshot: dict, phase_b_metrics: RepresentationMetrics, epochs: int) -> dict:
+        best_candidate = None
+        lambda_candidates = self.config["objectives"].get("lambda_traj_candidates", [0.1, 0.2, 0.5])
+        for lambda_traj in lambda_candidates:
+            self._restore_snapshot(phase_b_snapshot)
+            history = self._run_phase(
+                "phase_c",
+                epochs,
+                lambda_rec=self.config["objectives"].get("lambda_rec", 0.2),
+                lambda_traj=lambda_traj,
+            )
+            metrics = self._full_validation_metrics(self.loaders["val"])
+            accepted = (
+                metrics.trajectory_alignment_mean > phase_b_metrics.trajectory_alignment_mean
+                and metrics.prediction_cosine_mean >= (phase_b_metrics.prediction_cosine_mean - phase_b_metrics.prediction_cosine_sem)
+            )
+            candidate = {
+                "lambda_traj": lambda_traj,
+                "accepted": accepted,
+                "history": history,
+                "metrics": metrics,
+                "snapshot": self._snapshot_state(),
+            }
+            if accepted and (
+                best_candidate is None
+                or metrics.trajectory_alignment_mean > best_candidate["metrics"].trajectory_alignment_mean
+            ):
+                best_candidate = candidate
+
+        if best_candidate is None:
+            self._restore_snapshot(phase_b_snapshot)
+            return {
+                "accepted": False,
+                "reason": "no_phase_c_candidate_met_acceptance_rule",
+                "metrics": phase_b_metrics,
+            }
+
+        self._restore_snapshot(best_candidate["snapshot"])
+        return {
+            "accepted": True,
+            "lambda_traj": best_candidate["lambda_traj"],
+            "metrics": best_candidate["metrics"],
+        }
+
+    def _snapshot_state(self) -> dict:
+        return {
+            "observer": deepcopy(self.components.observer.state_dict()),
+            "tokenizer": deepcopy(self.components.tokenizer.state_dict()),
+            "encoder": deepcopy(self.components.encoder.state_dict()),
+            "objective": deepcopy(self.components.objective.state_dict()),
+            "optimizer": deepcopy(self.optimizer.state_dict()),
+            "scheduler": deepcopy(self.scheduler.state_dict()),
+        }
+
+    def _restore_snapshot(self, snapshot: dict) -> None:
+        self.components.observer.load_state_dict(snapshot["observer"])
+        self.components.tokenizer.load_state_dict(snapshot["tokenizer"])
+        self.components.encoder.load_state_dict(snapshot["encoder"])
+        self.components.objective.load_state_dict(snapshot["objective"])
+        self.optimizer.load_state_dict(snapshot["optimizer"])
+        self.scheduler.load_state_dict(snapshot["scheduler"])
+
+    def _save_checkpoint(
+        self,
+        *,
+        name: str,
+        phase: str,
+        validation: dict,
+        extra_summary: dict | None = None,
+    ) -> None:
+        checkpoint = {
+            "version": 1,
+            "phase": phase,
+            "config": self.config,
+            "observer_state": self.components.observer.state_dict(),
+            "tokenizer_state": self.components.tokenizer.state_dict(),
+            "encoder_state": self.components.encoder.state_dict(),
+            "objective_state": self.components.objective.state_dict(),
+            "optimizer_state": self.optimizer.state_dict(),
+            "scheduler_state": self.scheduler.state_dict(),
+            "validation": validation,
+            "summary": extra_summary or {},
+        }
+        torch.save(checkpoint, self.checkpoint_dir / name)
+
+
+def _forward_pass(
+    components: LoadedFlowComponents,
+    images: torch.Tensor,
+    *,
+    lambda_rec: float,
+    lambda_traj: float,
+    traj_topk: int = 8,
+    traj_gamma: float = 0.2,
+    traj_tau: float = 0.1,
+) -> tuple:
+    observations = components.observer(images)
+    tokenized = components.tokenizer(observations)
+    z, _ = components.encoder(tokenized.token_inputs)
+    output = components.objective(
+        z,
+        tokenized.flow_targets,
+        tokenized.future_descriptors,
+        lambda_pred=components.config["objectives"].get("lambda_pred", 1.0),
+        lambda_rec=lambda_rec,
+        lambda_traj=lambda_traj,
+        traj_topk=traj_topk,
+        traj_gamma=traj_gamma,
+        traj_tau=traj_tau,
+    )
+    return tokenized, z, output

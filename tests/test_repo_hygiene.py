@@ -1,0 +1,107 @@
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+NOTEBOOK_DIR = REPO_ROOT / "notebooks"
+EXPECTED_NOTEBOOKS = {
+    "nb01_training_and_representation_metrics.ipynb",
+    "nb02_candidate_circuit_discovery_and_stability.ipynb",
+    "nb03_interventions_and_qualitative_analysis.ipynb",
+}
+LEGACY_NOTEBOOKS = {
+    "nb01_training_and_validation.ipynb",
+    "nb02_analysis.ipynb",
+    "nb03_causal_interventions.ipynb",
+    "nb03_trajectory_animation.ipynb",
+}
+LEGACY_PATTERNS = (
+    re.compile(r"^from models\b", re.MULTILINE),
+    re.compile(r"^from losses\b", re.MULTILINE),
+    re.compile(r"^from training\b", re.MULTILINE),
+    re.compile(r"^from evaluation\b", re.MULTILINE),
+    re.compile(r"^from data\b", re.MULTILINE),
+    re.compile(r"\bctls-"),
+    re.compile(r"\bInfoLoss\b"),
+    re.compile(r"\bSpanCentricDiscovery\b"),
+    re.compile(r"\bPhase1Trainer\b"),
+)
+TEXT_EXTENSIONS = {".md", ".py", ".toml", ".yaml", ".yml", ".txt", ".ipynb"}
+SKIP_DIRS = {
+    ".git",
+    ".pytest_cache",
+    "__pycache__",
+    ".mypy_cache",
+}
+
+
+def _iter_repo_text_files():
+    for path in REPO_ROOT.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(REPO_ROOT)
+        if any(part in SKIP_DIRS or part.endswith(".egg-info") for part in path.parts):
+            continue
+        if relative.parts[:1] == ("tests",):
+            continue
+        if path.suffix in TEXT_EXTENSIONS:
+            yield path
+
+
+def test_repo_contains_only_new_notebook_suite():
+    notebook_names = {path.name for path in NOTEBOOK_DIR.glob("*.ipynb")}
+    assert notebook_names == EXPECTED_NOTEBOOKS
+    assert not any((NOTEBOOK_DIR / name).exists() for name in LEGACY_NOTEBOOKS)
+
+
+def test_notebooks_have_expected_structure_and_compilable_code_cells():
+    required_config_names = {
+        "CONFIG_PATH",
+        "CHECKPOINT_PATH",
+        "CIRCUITS_PATH",
+        "OUTPUT_DIR",
+        "QUICK_MODE",
+    }
+    for notebook_name in EXPECTED_NOTEBOOKS:
+        path = NOTEBOOK_DIR / notebook_name
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert len(data["cells"]) >= 4
+        assert data["cells"][0]["cell_type"] == "markdown"
+        assert data["cells"][1]["cell_type"] == "code"
+        assert data["cells"][2]["cell_type"] == "code"
+        assert data["cells"][3]["cell_type"] == "code"
+
+        setup_source = "".join(data["cells"][1]["source"])
+        assert "REPO_URL =" in setup_source, f"{notebook_name} missing GitHub bootstrap setup"
+        assert "drive.mount(" in setup_source, f"{notebook_name} missing Drive mount setup"
+
+        imports_source = "".join(data["cells"][2]["source"]).strip().splitlines()
+        assert imports_source, f"{notebook_name} second cell should import flow_circuits symbols"
+        for line in imports_source:
+            stripped = line.strip()
+            assert stripped.startswith("from flow_circuits.") or stripped.startswith("import flow_circuits"), (
+                f"{notebook_name} import cell must import only flow_circuits symbols: {stripped}"
+            )
+
+        config_source = "".join(data["cells"][3]["source"])
+        for name in required_config_names:
+            assert f"{name} =" in config_source, f"{notebook_name} missing {name} in config cell"
+
+        for index, cell in enumerate(data["cells"]):
+            if cell["cell_type"] != "code":
+                continue
+            source = "".join(cell["source"])
+            compile(source, f"{notebook_name}:cell{index}", "exec")
+
+
+def test_repo_text_has_no_legacy_runtime_references():
+    offenders: list[str] = []
+    for path in _iter_repo_text_files():
+        content = path.read_text(encoding="utf-8")
+        for pattern in LEGACY_PATTERNS:
+            if pattern.search(content):
+                offenders.append(f"{path.relative_to(REPO_ROOT)} -> {pattern.pattern}")
+    assert offenders == []
