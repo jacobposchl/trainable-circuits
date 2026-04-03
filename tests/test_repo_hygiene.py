@@ -99,6 +99,16 @@ def test_notebooks_have_expected_structure_and_compilable_code_cells():
             compile(source, f"{notebook_name}:cell{index}", "exec")
 
 
+def test_nb01_phase_c_schedule_matches_documented_modes():
+    data = json.loads((NOTEBOOK_DIR / "nb01_training_and_representation_metrics.ipynb").read_text(encoding="utf-8"))
+    mode_cell_source = "".join(data["cells"][5]["source"])
+
+    assert "import sys" in mode_cell_source
+    assert "'phase_c': 1" in mode_cell_source
+    assert "'phase_c': 5" in mode_cell_source
+    assert "effective_phase_epochs['phase_c'] = 0" in mode_cell_source
+
+
 def test_repo_text_has_no_legacy_runtime_references():
     offenders: list[str] = []
     for path in _iter_repo_text_files():

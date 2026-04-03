@@ -477,6 +477,11 @@ class FlowCircuitTrainer:
     def _run_phase_c_sweep(self, *, phase_b_snapshot: dict, phase_b_metrics: RepresentationMetrics, epochs: int) -> dict:
         best_candidate = None
         ocfg = self.config["objectives"]
+        missing = object()
+        original_traj_config = {
+            key: ocfg.get(key, missing)
+            for key in ("lambda_traj", "traj_topk", "traj_gamma", "traj_tau")
+        }
         lambda_candidates = ocfg.get("lambda_traj_candidates", [0.1, 0.2, 0.5])
         topk_candidates = ocfg.get("traj_topk_candidates", [ocfg.get("traj_topk", 8)])
         gamma_candidates = ocfg.get("traj_gamma_candidates", [ocfg.get("traj_gamma", 0.2)])
@@ -502,6 +507,7 @@ class FlowCircuitTrainer:
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(epochs, 1))
             # Temporarily override per-candidate trajectory hyperparameters so
             # _run_epoch picks them up from self.config.
+            ocfg["lambda_traj"] = lambda_traj
             ocfg["traj_topk"] = traj_topk
             ocfg["traj_gamma"] = traj_gamma
             ocfg["traj_tau"] = traj_tau
@@ -544,6 +550,11 @@ class FlowCircuitTrainer:
             _pe = self.config["training"]["phase_epochs"]
             ab_epochs = _pe.get("phase_a", 0) + _pe.get("phase_b", 0)
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(ab_epochs, 1))
+            for key, value in original_traj_config.items():
+                if value is missing:
+                    ocfg.pop(key, None)
+                else:
+                    ocfg[key] = value
             _log("\nNo candidate improved trajectory alignment without hurting prediction.")
             _log("Reverting to Phase B checkpoint.\n")
             return {
@@ -554,6 +565,7 @@ class FlowCircuitTrainer:
 
         # Persist the winning hyperparameters in config so the saved checkpoint
         # is self-consistent.
+        ocfg["lambda_traj"] = best_candidate["lambda_traj"]
         ocfg["traj_topk"] = best_candidate["traj_topk"]
         ocfg["traj_gamma"] = best_candidate["traj_gamma"]
         ocfg["traj_tau"] = best_candidate["traj_tau"]
