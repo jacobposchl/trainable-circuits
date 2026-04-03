@@ -55,7 +55,26 @@ def main() -> None:
         writer.writeheader()
         for result in results:
             writer.writerow(result.to_dict())
-    print(json.dumps([result.to_dict() for result in results], indent=2))
+    bar = "=" * 64
+    n_validated = sum(1 for r in results if r.validated)
+    print(f"\n{bar}", flush=True)
+    print(f"Intervention Results  ({len(results)} circuits tested)", flush=True)
+    print(bar, flush=True)
+    print(f"  Validated circuits (all 3 tests pass) : {n_validated}/{len(results)}", flush=True)
+    if results:
+        print(f"\n  {'Circuit':>7}  {'Members':>7}  {'Controls':>8}  {'Member delta':>12}  {'Status'}", flush=True)
+        print(f"  {'-'*7}  {'-'*7}  {'-'*8}  {'-'*12}  {'-'*8}", flush=True)
+        for r in results:
+            status = "VALIDATED" if r.validated else "rejected"
+            print(
+                f"  {r.circuit_id:>7}  {r.n_members:>7}  {r.n_controls:>8}"
+                f"  {r.mean_member_delta_margin:>+12.4f}  {status}",
+                flush=True,
+            )
+    print(f"\n  A circuit is validated when ablating its active nodes causes a")
+    print(f"  larger confidence drop for member images than for matched controls,")
+    print(f"  random nodes, and random cells (all Holm-corrected p < alpha).")
+    print(f"\n  Full results saved to file.\n{bar}\n", flush=True)
 
 
 if __name__ == "__main__":

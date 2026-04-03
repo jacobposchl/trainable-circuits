@@ -78,11 +78,20 @@ class SupervisedBackboneTrainer:
         best_val_accuracy = float("-inf")
         best_epoch = 0
         best_state = None
+        print(f"\n{'=' * 64}", flush=True)
+        print(f"Backbone Training — {self.arch} on CIFAR-10  ({self.epochs} epochs)", flush=True)
+        print(f"{'=' * 64}", flush=True)
         for epoch in range(1, self.epochs + 1):
             self._run_epoch(self.loaders["train"], train=True)
             val_accuracy = self._run_epoch(self.loaders["val"], train=False)
             self.scheduler.step()
-            print(f"[backbone epoch {epoch}/{self.epochs}]  val_acc={val_accuracy:.4f}", flush=True)
+            is_best = val_accuracy > best_val_accuracy
+            print(
+                f"  Epoch {epoch:{len(str(self.epochs))}}/{self.epochs}"
+                f"  |  val_acc={val_accuracy:.4f}"
+                + ("  <- best so far" if is_best else ""),
+                flush=True,
+            )
             if val_accuracy > best_val_accuracy:
                 best_val_accuracy = val_accuracy
                 best_epoch = epoch

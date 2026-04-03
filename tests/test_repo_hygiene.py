@@ -59,20 +59,22 @@ def test_repo_contains_only_new_notebook_suite():
 
 def test_notebooks_have_expected_structure_and_compilable_code_cells():
     required_config_names = {
-        "CONFIG_PATH",
+        "TRAINING_MODE",
+        "CONFIG_NAME",
         "CHECKPOINT_PATH",
-        "CIRCUITS_PATH",
         "OUTPUT_DIR",
-        "QUICK_MODE",
     }
     for notebook_name in EXPECTED_NOTEBOOKS:
         path = NOTEBOOK_DIR / notebook_name
         data = json.loads(path.read_text(encoding="utf-8"))
-        assert len(data["cells"]) >= 4
+        assert len(data["cells"]) >= 5
         assert data["cells"][0]["cell_type"] == "markdown"
         assert data["cells"][1]["cell_type"] == "code"
         assert data["cells"][2]["cell_type"] == "code"
-        assert data["cells"][3]["cell_type"] == "code"
+        # cell 3 is now a markdown config-explanation cell
+        assert data["cells"][3]["cell_type"] == "markdown"
+        # cell 4 is the config code cell
+        assert data["cells"][4]["cell_type"] == "code"
 
         setup_source = "".join(data["cells"][1]["source"])
         assert "REPO_URL =" in setup_source, f"{notebook_name} missing GitHub bootstrap setup"
@@ -86,9 +88,9 @@ def test_notebooks_have_expected_structure_and_compilable_code_cells():
                 f"{notebook_name} import cell must import only flow_circuits symbols: {stripped}"
             )
 
-        config_source = "".join(data["cells"][3]["source"])
+        config_source = "".join(data["cells"][4]["source"])
         for name in required_config_names:
-            assert f"{name} =" in config_source, f"{notebook_name} missing {name} in config cell"
+            assert re.search(rf"^{name}\s*=", config_source, re.MULTILINE), f"{notebook_name} missing {name} in config cell"
 
         for index, cell in enumerate(data["cells"]):
             if cell["cell_type"] != "code":

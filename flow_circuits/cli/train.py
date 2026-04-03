@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 
 import yaml
 
@@ -20,7 +19,8 @@ def main() -> None:
         config = yaml.safe_load(handle)
     trainer = FlowCircuitTrainer(config)
     summary = trainer.train()
-    print(json.dumps(summary, indent=2))
+    checkpoint_dir = config.get("logging", {}).get("checkpoint_dir", ".")
+    print(f"Checkpoint saved to: {checkpoint_dir}/final.pt")
 
 
 if __name__ == "__main__":

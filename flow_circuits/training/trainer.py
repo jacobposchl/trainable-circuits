@@ -239,9 +239,13 @@ class FlowCircuitTrainer:
 
         n_a = phase_epochs.get("phase_a", 0)
         n_b = phase_epochs.get("phase_b", 0)
-        print(f"[train] phase_a  ({n_a} epochs)", flush=True)
+        _log_section(f"Phase A — Prediction  ({n_a} epoch{'s' if n_a != 1 else ''})")
+        _log("The encoder learns to predict how each ResNet layer's residual flow")
+        _log("will change into the next layer (next-step prediction objective).")
         history.extend(self._run_phase("phase_a", n_a, lambda_rec=0.0, lambda_traj=0.0))
-        print(f"[train] phase_b  ({n_b} epochs)", flush=True)
+        _log_section(f"Phase B — Prediction + Reconstruction  ({n_b} epoch{'s' if n_b != 1 else ''})")
+        _log("Adds a reconstruction objective: the encoder must also recover the")
+        _log("current layer's flow from its own output.")
         history.extend(
             self._run_phase(
                 "phase_b",
@@ -250,8 +254,9 @@ class FlowCircuitTrainer:
                 lambda_traj=0.0,
             )
         )
-        print("[train] running full validation...", flush=True)
+        _log("\nRunning held-out validation...")
         phase_b_metrics = self._full_validation_metrics(self.loaders["val"])
+        _log(f"  pred_cos={phase_b_metrics.prediction_cosine_mean:.4f}  recon_cos={phase_b_metrics.reconstruction_cosine_mean:.4f}")
         self._save_checkpoint(
             name="phase_b.pt",
             phase="phase_b",
@@ -264,12 +269,21 @@ class FlowCircuitTrainer:
         phase_c_summary = None
 
         if mode == "aligned" and phase_epochs.get("phase_c", 0) > 0:
-            print("[train] fitting baseline regressors...", flush=True)
+            _log_section("Baseline Check")
+            _log("Fitting three simple predictors to compare against the encoder:")
+            _log("  (1) per-node mean predictor  (2) local CNN MLP  (3) flow target MLP")
+            _log("The encoder must beat the best of these to proceed to Phase C.\n")
             baseline_regressors = self._fit_baselines()
-            print("[train] evaluating baselines...", flush=True)
             baseline_metrics = self._evaluate_baselines(baseline_regressors)
-            print(f"[train] phase_b pred_cos={phase_b_metrics.prediction_cosine_mean:.4f}  best_baseline={baseline_metrics.best_baseline:.4f}", flush=True)
+            bm = baseline_metrics
+            enc = phase_b_metrics.prediction_cosine_mean
+            _log(f"  Mean predictor  : pred_cos = {bm.mean_baseline:.4f}{'  <- best' if bm.best_baseline_name == 'mean_baseline' else ''}")
+            _log(f"  Local CNN MLP   : pred_cos = {bm.local_baseline:.4f}{'  <- best' if bm.best_baseline_name == 'local_baseline' else ''}")
+            _log(f"  Flow target MLP : pred_cos = {bm.flow_baseline:.4f}{'  <- best' if bm.best_baseline_name == 'flow_baseline' else ''}")
+            _log(f"  Our encoder     : pred_cos = {enc:.4f}")
             if phase_b_metrics.prediction_cosine_mean > baseline_metrics.best_baseline:
+                _log(f"\n  Encoder beats best baseline by +{enc - bm.best_baseline:.4f}")
+                _log("  Phase C (trajectory alignment sweep) will now run.")
                 phase_b_snapshot = self._snapshot_state()
                 phase_c_result = self._run_phase_c_sweep(
                 phase_b_snapshot=phase_b_snapshot,
@@ -281,6 +295,8 @@ class FlowCircuitTrainer:
                     final_phase = "phase_c"
                     final_metrics = phase_c_result["metrics"]
             else:
+                _log(f"\n  Encoder ({enc:.4f}) does not beat best baseline ({bm.best_baseline:.4f}).")
+                _log("  Phase C will be skipped. Consider training for more epochs.")
                 phase_c_summary = {
                     "accepted": False,
                     "reason": "phase_b_prediction_not_above_best_baseline",
@@ -299,6 +315,12 @@ class FlowCircuitTrainer:
             validation=summary["final_metrics"],
             extra_summary=summary,
         )
+        _log_section("Training Complete")
+        _log(f"  Final phase        : {final_phase}")
+        _log(f"  Prediction cosine  : {final_metrics.prediction_cosine_mean:.4f}  (1.0 = perfect; higher is better)")
+        _log(f"  Reconstruction cos : {final_metrics.reconstruction_cosine_mean:.4f}")
+        _log(f"  Traj. alignment    : {final_metrics.trajectory_alignment_mean:.4f}  (spatial consistency across images)")
+        _log()
         return summary
 
     def _run_phase(self, phase: str, epochs: int, *, lambda_rec: float, lambda_traj: float) -> list[dict]:
@@ -324,13 +346,16 @@ class FlowCircuitTrainer:
                 "val": val_metrics,
             }
             results.append(result)
-            print(
-                f"[{phase} epoch {epoch_idx + 1}/{epochs}]"
-                f"  train_loss={train_metrics['loss']:.4f}"
-                f"  pred_cos={train_metrics['prediction_cosine']:.4f}"
-                f"  val_loss={val_metrics['loss']:.4f}"
-                f"  val_pred_cos={val_metrics['prediction_cosine']:.4f}",
-                flush=True,
+            prev_cos = results[-2]["val"]["prediction_cosine"] if len(results) >= 2 else None
+            trend = ""
+            if prev_cos is not None:
+                d = val_metrics["prediction_cosine"] - prev_cos
+                trend = " (improving)" if d > 0.001 else (" (dropping)" if d < -0.001 else "")
+            w = len(str(epochs))
+            _log(
+                f"  Epoch {epoch_idx + 1:{w}}/{epochs}"
+                f"  |  train  loss={train_metrics['loss']:.4f}  pred_cos={train_metrics['prediction_cosine']:.4f}"
+                f"  |  val  pred_cos={val_metrics['prediction_cosine']:.4f}{trend}"
             )
         return results
 
@@ -458,17 +483,19 @@ class FlowCircuitTrainer:
         tau_candidates = ocfg.get("traj_tau_candidates", [ocfg.get("traj_tau", 0.1)])
 
         n_candidates = len(lambda_candidates) * len(topk_candidates) * len(gamma_candidates) * len(tau_candidates)
-        print(f"[train] phase_c sweep  ({n_candidates} candidates, {epochs} epochs each)", flush=True)
+        _log_section(
+            f"Phase C — Trajectory Alignment Sweep"
+            f"  ({n_candidates} candidate{'s' if n_candidates != 1 else ''} x {epochs} epoch{'s' if epochs != 1 else ''})"
+        )
+        _log("Goal: find hyperparameters where a contrastive alignment loss improves")
+        _log("      spatial consistency without hurting prediction quality.")
+        _log(f"      Testing {len(lambda_candidates)} lambda x {len(topk_candidates)} topk x {len(gamma_candidates)} gamma x {len(tau_candidates)} tau combinations.\n")
         candidate_idx = 0
         for lambda_traj, traj_topk, traj_gamma, traj_tau in itertools.product(
             lambda_candidates, topk_candidates, gamma_candidates, tau_candidates
         ):
             candidate_idx += 1
-            print(
-                f"[train] phase_c candidate {candidate_idx}/{n_candidates}"
-                f"  λ_traj={lambda_traj}  topk={traj_topk}  γ={traj_gamma}  τ={traj_tau}",
-                flush=True,
-            )
+            _log(f"  Candidate {candidate_idx}/{n_candidates}  lambda_traj={lambda_traj}  topk={traj_topk}  gamma={traj_gamma}  tau={traj_tau}")
             self._restore_snapshot(phase_b_snapshot)
             # Fresh cosine schedule for each Phase C candidate so it decays
             # over phase_c epochs rather than inheriting Phase A+B T_max.
@@ -488,6 +515,12 @@ class FlowCircuitTrainer:
             accepted = (
                 metrics.trajectory_alignment_mean > phase_b_metrics.trajectory_alignment_mean
                 and metrics.prediction_cosine_mean >= (phase_b_metrics.prediction_cosine_mean - phase_b_metrics.prediction_cosine_sem)
+            )
+            traj_diff = metrics.trajectory_alignment_mean - phase_b_metrics.trajectory_alignment_mean
+            _log(
+                f"    -> traj_align={metrics.trajectory_alignment_mean:.4f} ({'+' if traj_diff >= 0 else ''}{traj_diff:.4f})"
+                f"  pred_cos={metrics.prediction_cosine_mean:.4f}"
+                f"  {'ACCEPTED' if accepted else 'rejected'}"
             )
             candidate = {
                 "lambda_traj": lambda_traj,
@@ -511,6 +544,8 @@ class FlowCircuitTrainer:
             _pe = self.config["training"]["phase_epochs"]
             ab_epochs = _pe.get("phase_a", 0) + _pe.get("phase_b", 0)
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(ab_epochs, 1))
+            _log("\nNo candidate improved trajectory alignment without hurting prediction.")
+            _log("Reverting to Phase B checkpoint.\n")
             return {
                 "accepted": False,
                 "reason": "no_phase_c_candidate_met_acceptance_rule",
@@ -523,6 +558,8 @@ class FlowCircuitTrainer:
         ocfg["traj_gamma"] = best_candidate["traj_gamma"]
         ocfg["traj_tau"] = best_candidate["traj_tau"]
         self._restore_snapshot(best_candidate["snapshot"])
+        _log(f"\nBest candidate: lambda_traj={best_candidate['lambda_traj']}  topk={best_candidate['traj_topk']}  gamma={best_candidate['traj_gamma']}  tau={best_candidate['traj_tau']}")
+        _log(f"  traj_align={best_candidate['metrics'].trajectory_alignment_mean:.4f}  pred_cos={best_candidate['metrics'].prediction_cosine_mean:.4f}\n")
         return {
             "accepted": True,
             "lambda_traj": best_candidate["lambda_traj"],
@@ -575,6 +612,17 @@ class FlowCircuitTrainer:
             "summary": extra_summary or {},
         }
         torch.save(checkpoint, self.checkpoint_dir / name)
+
+
+def _log(msg: str = "") -> None:
+    print(msg, flush=True)
+
+
+def _log_section(title: str) -> None:
+    bar = "=" * 64
+    print(f"\n{bar}", flush=True)
+    print(title, flush=True)
+    print(bar, flush=True)
 
 
 def _forward_pass(

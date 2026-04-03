@@ -152,7 +152,7 @@ def main() -> None:
         output_path = Path(args.checkpoint).with_name(f"{args.split}_evaluation.json")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-    print(json.dumps(summary, indent=2))
+    _print_evaluation_summary(summary)
 
 
 def _max_images_for_split(config: dict, split: str) -> int | None:
@@ -229,6 +229,67 @@ def _depth_order_alignment_null(
         "depth_permuted_alignment_mean": permuted_mean,
         "drop": observed_mean - permuted_mean,
     }
+
+
+def _print_evaluation_summary(s: dict) -> None:
+    bar = "=" * 64
+    rm = s["representation_metrics"]
+    bl = s["baseline_comparison"]
+    cc = s.get("confirmatory_checks", {})
+    nc = s.get("null_checks", {})
+
+    print(f"\n{bar}", flush=True)
+    print(f"Evaluation Results  (split={s['split']}, n={s['n_images']:,} images)", flush=True)
+    print(bar, flush=True)
+
+    pred_mean = rm.get("prediction_cosine_mean", float("nan"))
+    pred_sem  = rm.get("prediction_cosine_sem", float("nan"))
+    recon     = rm.get("reconstruction_cosine_mean", float("nan"))
+    recon_sem = rm.get("reconstruction_cosine_sem", float("nan"))
+    traj_mean = rm.get("trajectory_alignment_mean", float("nan"))
+    traj_std  = rm.get("trajectory_alignment_std", float("nan"))
+    best_bl   = bl.get("best_baseline", float("nan"))
+
+    print("\nRepresentation Quality", flush=True)
+    print(f"  Prediction cosine  : {pred_mean:.4f} +/- {pred_sem:.4f}", flush=True)
+    print(f"    How well the encoder predicts next-layer flow targets.", flush=True)
+    print(f"    1.0 = perfect. Best simple baseline = {best_bl:.4f}.", flush=True)
+    print(f"  Reconstruction cos : {recon:.4f} +/- {recon_sem:.4f}", flush=True)
+    print(f"    How well the encoder reconstructs the current layer's flow.", flush=True)
+    print(f"  Trajectory align   : {traj_mean:.4f} +/- {traj_std:.4f} std", flush=True)
+    print(f"    Spatial consistency of representations across images.", flush=True)
+
+    print("\nBaseline Comparison  (three simple predictors)", flush=True)
+    best_name = bl.get("best_baseline_name", "")
+    for name, label in [("mean_baseline", "Mean predictor "), ("local_baseline", "Local CNN MLP  "), ("flow_baseline", "Flow target MLP")]:
+        best_marker = "  <- best" if best_name == name else ""
+        print(f"  {label}: {bl.get(name, float('nan')):.4f}{best_marker}", flush=True)
+    print(f"  Our encoder    : {pred_mean:.4f}  (+{pred_mean - best_bl:.4f} vs best baseline)", flush=True)
+
+    if cc:
+        print("\nConfirmatory Checks", flush=True)
+        for key, label in [("p1_prediction_vs_best_baseline", "P1 prediction > baseline"),
+                            ("p2_alignment_vs_best_baseline", "P2 alignment  > baseline")]:
+            c = cc.get(key, {})
+            status = "PASS" if c.get("passes") else "FAIL"
+            ci_lo = c.get("ci_lower", 0)
+            ci_hi = c.get("ci_upper", 0)
+            print(f"  {label} : {status}  CI [{ci_lo:.4f}, {ci_hi:.4f}]", flush=True)
+
+    if nc:
+        print("\nNull Checks  (sanity — expect meaningful drops below)", flush=True)
+        fut = nc.get("future_shuffle_prediction", {})
+        dep = nc.get("depth_order_alignment", {})
+        fut_drop = fut.get("drop", 0)
+        dep_drop = dep.get("drop", 0)
+        fut_ok = "OK" if fut_drop > 0.1 else "WARN"
+        dep_ok = "OK" if dep_drop > 0.0 else "WARN"
+        print(f"  Shuffle future targets  : drop={fut_drop:.4f}  [{fut_ok}]", flush=True)
+        print(f"    Large drop means the encoder genuinely uses future structure.", flush=True)
+        print(f"  Permute depth order     : drop={dep_drop:.4f}  [{dep_ok}]", flush=True)
+        print(f"    Positive drop means the encoder uses depth ordering.", flush=True)
+
+    print(f"\nFull results saved to file.\n{bar}\n", flush=True)
 
 
 if __name__ == "__main__":

@@ -109,7 +109,21 @@ def main() -> None:
     else:
         output_path = Path(args.checkpoint).with_name("candidate_circuits.json")
     CandidateCircuitDiscoverer(**discoverer_kwargs, random_seed=primary_run["seed"]).save(artifact, output_path)
-    print(json.dumps({"n_circuits": len(artifact["circuits"]), "output": str(output_path)}, indent=2))
+    n_circuits = len(artifact["circuits"])
+    n_nodes = artifact["metadata"]["n_layers"] * artifact["metadata"]["n_cells"]
+    active_nodes = {tuple(node) for c in artifact["circuits"] for node in c["active_nodes"]}
+    coverage = len(active_nodes) / max(n_nodes, 1)
+    bar = "=" * 64
+    print(f"\n{bar}", flush=True)
+    print("Circuit Discovery Complete", flush=True)
+    print(bar, flush=True)
+    print(f"  Candidate circuits found : {n_circuits}", flush=True)
+    print(f"  Active node coverage     : {len(active_nodes)}/{n_nodes} nodes ({coverage:.1%})", flush=True)
+    if n_circuits > 0:
+        sizes = [len(c["image_set"]) for c in artifact["circuits"]]
+        print(f"  Circuit size (images)    : min={min(sizes)}  max={max(sizes)}  mean={sum(sizes)/len(sizes):.1f}", flush=True)
+    print(f"  Results saved to         : {output_path}", flush=True)
+    print(f"{bar}\n", flush=True)
 
 
 if __name__ == "__main__":
