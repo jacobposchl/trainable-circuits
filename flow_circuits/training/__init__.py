@@ -7,6 +7,7 @@ from flow_circuits.training.trainer import (
     collect_discovery_outputs,
     collect_intervention_outputs,
     collect_model_outputs,
+    collect_probe_outputs,
     load_components_from_checkpoint,
 )
 
@@ -19,5 +20,6 @@ __all__ = [
     "collect_discovery_outputs",
     "collect_intervention_outputs",
     "collect_model_outputs",
+    "collect_probe_outputs",
     "load_components_from_checkpoint",
 ]

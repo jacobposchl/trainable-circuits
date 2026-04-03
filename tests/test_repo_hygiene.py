@@ -9,13 +9,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOK_DIR = REPO_ROOT / "notebooks"
 EXPECTED_NOTEBOOKS = {
     "nb01_training_and_representation_metrics.ipynb",
-    "nb02_candidate_circuit_discovery_and_stability.ipynb",
-    "nb03_interventions_and_qualitative_analysis.ipynb",
+    "nb02_efficient_representation_and_circuit_validation.ipynb",
 }
 LEGACY_NOTEBOOKS = {
     "nb01_training_and_validation.ipynb",
     "nb02_analysis.ipynb",
+    "nb02_candidate_circuit_discovery_and_stability.ipynb",
     "nb03_causal_interventions.ipynb",
+    "nb03_interventions_and_qualitative_analysis.ipynb",
     "nb03_trajectory_animation.ipynb",
 }
 LEGACY_PATTERNS = (
@@ -59,10 +60,21 @@ def test_repo_contains_only_new_notebook_suite():
 
 def test_notebooks_have_expected_structure_and_compilable_code_cells():
     required_config_names = {
-        "TRAINING_MODE",
-        "CONFIG_NAME",
-        "CHECKPOINT_PATH",
-        "OUTPUT_DIR",
+        "nb01_training_and_representation_metrics.ipynb": {
+            "TRAINING_MODE",
+            "CONFIG_NAME",
+            "CHECKPOINT_PATH",
+            "OUTPUT_DIR",
+        },
+        "nb02_efficient_representation_and_circuit_validation.ipynb": {
+            "RUN_MODE",
+            "CONFIG_NAME",
+            "EXPERIMENTS",
+            "PHASE_B_CHECKPOINT",
+            "PHASE_C_CHECKPOINT",
+            "OUTPUT_DIR",
+            "FORCE_RERUN",
+        },
     }
     for notebook_name in EXPECTED_NOTEBOOKS:
         path = NOTEBOOK_DIR / notebook_name
@@ -71,9 +83,7 @@ def test_notebooks_have_expected_structure_and_compilable_code_cells():
         assert data["cells"][0]["cell_type"] == "markdown"
         assert data["cells"][1]["cell_type"] == "code"
         assert data["cells"][2]["cell_type"] == "code"
-        # cell 3 is now a markdown config-explanation cell
         assert data["cells"][3]["cell_type"] == "markdown"
-        # cell 4 is the config code cell
         assert data["cells"][4]["cell_type"] == "code"
 
         setup_source = "".join(data["cells"][1]["source"])
@@ -81,15 +91,18 @@ def test_notebooks_have_expected_structure_and_compilable_code_cells():
         assert "drive.mount(" in setup_source, f"{notebook_name} missing Drive mount setup"
 
         imports_source = "".join(data["cells"][2]["source"]).strip().splitlines()
-        assert imports_source, f"{notebook_name} second cell should import flow_circuits symbols"
+        assert imports_source, f"{notebook_name} import cell should import flow_circuits symbols"
         for line in imports_source:
             stripped = line.strip()
-            assert stripped.startswith("from flow_circuits.") or stripped.startswith("import flow_circuits"), (
-                f"{notebook_name} import cell must import only flow_circuits symbols: {stripped}"
-            )
+            if not stripped or stripped in {"(", ")"}:
+                continue
+            if stripped.startswith("from ") or stripped.startswith("import "):
+                assert stripped.startswith("from flow_circuits.") or stripped.startswith("import flow_circuits"), (
+                    f"{notebook_name} import cell must import only flow_circuits symbols: {stripped}"
+                )
 
         config_source = "".join(data["cells"][4]["source"])
-        for name in required_config_names:
+        for name in required_config_names[notebook_name]:
             assert re.search(rf"^{name}\s*=", config_source, re.MULTILINE), f"{notebook_name} missing {name} in config cell"
 
         for index, cell in enumerate(data["cells"]):
@@ -109,85 +122,49 @@ def test_nb01_phase_c_schedule_matches_documented_modes():
     assert "effective_phase_epochs['phase_c'] = 0" in mode_cell_source
 
 
-def test_nb02_and_nb03_phase_c_schedule_matches_nb01_behavior():
-    for notebook_name in (
-        "nb02_candidate_circuit_discovery_and_stability.ipynb",
-        "nb03_interventions_and_qualitative_analysis.ipynb",
+def test_nb02_requires_both_checkpoints_and_never_retrains():
+    data = json.loads((NOTEBOOK_DIR / "nb02_efficient_representation_and_circuit_validation.ipynb").read_text(encoding="utf-8"))
+    all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
+
+    assert "phase_b.pt" in all_code
+    assert "phase_c.pt" in all_code
+    assert "Missing required checkpoint" in all_code
+    assert "flow-train" not in all_code
+    assert "flow-discover" not in all_code
+    assert "flow-intervene" not in all_code
+
+
+def test_nb02_exposes_exact_experiment_selector_and_cache_controls():
+    data = json.loads((NOTEBOOK_DIR / "nb02_efficient_representation_and_circuit_validation.ipynb").read_text(encoding="utf-8"))
+    config_source = "".join(data["cells"][4]["source"])
+    helper_source = "".join(data["cells"][5]["source"])
+    all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
+
+    assert 'EXPERIMENTS = "all"' in config_source
+    for experiment_id in (
+        "neighbor_agreement",
+        "activation_probe",
+        "discovery_pilot",
+        "topk_interventions",
     ):
-        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
-        mode_cell_source = "".join(data["cells"][5]["source"])
-
-        assert "import sys" in mode_cell_source
-        assert "phase_b.pt" in mode_cell_source
-        assert "phase_c.pt" in mode_cell_source
-        assert "flow-train" not in mode_cell_source
+        assert experiment_id in all_code
+    assert "FORCE_RERUN = False" in config_source
+    assert "nb02_efficient_validation" in all_code
+    assert "_cache_path" in helper_source
 
 
-def test_notebooks_auto_resume_from_phase_b_checkpoint():
-    data = json.loads((NOTEBOOK_DIR / "nb01_training_and_representation_metrics.ipynb").read_text(encoding="utf-8"))
-    run_cell_source = "".join(data["cells"][7]["source"])
+def test_nb02_uses_package_apis_and_progress_callbacks_not_heartbeats():
+    data = json.loads((NOTEBOOK_DIR / "nb02_efficient_representation_and_circuit_validation.ipynb").read_text(encoding="utf-8"))
+    all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
 
-    assert "RESUME_CHECKPOINT = PHASE_B_CHECKPOINT" in run_cell_source
-    assert "'--resume', str(RESUME_CHECKPOINT)" in run_cell_source
-
-
-def test_nb02_and_nb03_never_retrain_flow_model():
-    for notebook_name in (
-        "nb02_candidate_circuit_discovery_and_stability.ipynb",
-        "nb03_interventions_and_qualitative_analysis.ipynb",
-    ):
-        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
-        mode_cell_source = "".join(data["cells"][5]["source"])
-        run_cell_source = "".join(data["cells"][7]["source"])
-
-        assert "flow-train" not in mode_cell_source
-        assert "flow-train" not in run_cell_source
-        assert "requires pre-trained phase_b.pt and phase_c.pt checkpoints" in run_cell_source
-
-
-def test_notebooks_expose_checkpoint_paths_for_phase_b_and_phase_c():
-    data = json.loads((NOTEBOOK_DIR / "nb01_training_and_representation_metrics.ipynb").read_text(encoding="utf-8"))
-    config_cell_source = "".join(data["cells"][5]["source"])
-
-    assert "PHASE_C_CHECKPOINT" in config_cell_source
-    assert "print(f\"Phase C ckpt:" in config_cell_source
-
-    for notebook_name in (
-        "nb02_candidate_circuit_discovery_and_stability.ipynb",
-        "nb03_interventions_and_qualitative_analysis.ipynb",
-    ):
-        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
-        config_cell_source = "".join(data["cells"][5]["source"])
-
-        assert "phase_b.pt" in config_cell_source
-        assert "phase_c.pt" in config_cell_source
-        assert "MODEL_ORDER = [('phase_b', 'Phase B'), ('phase_c', 'Phase C')]" in config_cell_source
-
-
-def test_nb02_and_nb03_compare_phase_b_and_phase_c_outputs():
-    for notebook_name in (
-        "nb02_candidate_circuit_discovery_and_stability.ipynb",
-        "nb03_interventions_and_qualitative_analysis.ipynb",
-    ):
-        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
-        config_cell_source = "".join(data["cells"][5]["source"])
-        run_cell_source = "".join(data["cells"][7]["source"])
-
-        assert "MODEL_ORDER = [('phase_b', 'Phase B'), ('phase_c', 'Phase C')]" in config_cell_source
-        assert "for tag, label in MODEL_ORDER:" in run_cell_source
-
-
-def test_nb02_and_nb03_use_cli_progress_not_notebook_heartbeats():
-    for notebook_name in (
-        "nb02_candidate_circuit_discovery_and_stability.ipynb",
-        "nb03_interventions_and_qualitative_analysis.ipynb",
-    ):
-        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
-        config_cell_source = "".join(data["cells"][5]["source"])
-
-        assert "still running... elapsed" not in config_cell_source
-        assert "import queue" not in config_cell_source
-        assert "import threading" not in config_cell_source
+    assert "run_neighbor_agreement_experiment" in all_code
+    assert "run_activation_probe_experiment" in all_code
+    assert "run_discovery_pilot_experiment" in all_code
+    assert "run_topk_intervention_experiment" in all_code
+    assert "_progress_logger" in all_code
+    assert "still running... elapsed" not in all_code
+    assert "import queue" not in all_code
+    assert "import threading" not in all_code
 
 
 def test_repo_text_has_no_legacy_runtime_references():

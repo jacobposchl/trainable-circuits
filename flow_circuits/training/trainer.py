@@ -16,7 +16,7 @@ import yaml
 from flow_circuits.backbones import FrozenResNetObserver
 from flow_circuits.data import build_cifar10_splits
 from flow_circuits.encoders import SpatiotemporalEncoder
-from flow_circuits.evaluation import RepresentationMetrics, evaluate_representation_metrics
+from flow_circuits.evaluation.metrics import RepresentationMetrics, evaluate_representation_metrics
 from flow_circuits.objectives import FlowObjective
 from flow_circuits.tokenization import FlowTokenizer
 from flow_circuits.training.baselines import BaselineRegressors
@@ -229,6 +229,67 @@ def collect_discovery_outputs(
             if max_images is not None and seen >= max_images:
                 break
     return _concatenate_output_tensors(outputs, max_images=max_images)
+
+
+def collect_probe_outputs(
+    components: LoadedFlowComponents,
+    loader,
+    *,
+    device: torch.device,
+    max_images: int | None = None,
+    progress_callback=None,
+) -> dict[str, torch.Tensor]:
+    outputs = {
+        "z": [],
+        "local_features": None,
+        "future_descriptors": [],
+        "labels": [],
+        "indices": [],
+    }
+    seen = 0
+    total_batches = _infer_total_batches(loader, components, max_images=max_images)
+    with torch.no_grad():
+        for batch_idx, (images, labels, indices) in enumerate(loader, start=1):
+            device_images = images.to(device)
+            observations = components.observer(device_images)
+            tokenized = components.tokenizer(observations)
+            z, _ = components.encoder(tokenized.token_inputs)
+            outputs["z"].append(z.cpu())
+            if outputs["local_features"] is None:
+                outputs["local_features"] = [[] for _ in tokenized.local_features]
+            for layer_idx, layer_features in enumerate(tokenized.local_features):
+                outputs["local_features"][layer_idx].append(layer_features.cpu())
+            outputs["future_descriptors"].append(tokenized.future_descriptors.cpu())
+            outputs["labels"].append(labels.cpu())
+            outputs["indices"].append(indices.cpu())
+            seen += device_images.shape[0]
+            _maybe_report_progress(
+                progress_callback,
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                seen_images=seen,
+                target_images=max_images,
+            )
+            if max_images is not None and seen >= max_images:
+                break
+
+    for key, value in outputs.items():
+        if not value:
+            continue
+        if key == "local_features":
+            continue
+        outputs[key] = torch.cat(value, dim=0)
+        if max_images is not None:
+            outputs[key] = outputs[key][:max_images]
+    if outputs["local_features"]:
+        concatenated_features = []
+        for values in outputs["local_features"]:
+            layer_tensor = torch.cat(values, dim=0)
+            if max_images is not None:
+                layer_tensor = layer_tensor[:max_images]
+            concatenated_features.append(layer_tensor)
+        outputs["local_features"] = concatenated_features
+    return outputs
 
 
 def collect_intervention_outputs(

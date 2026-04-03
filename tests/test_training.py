@@ -9,6 +9,7 @@ from flow_circuits.training import (
     FlowCircuitTrainer,
     collect_discovery_outputs,
     collect_intervention_outputs,
+    collect_probe_outputs,
     load_components_from_checkpoint,
 )
 from flow_circuits.evaluation import BaselineComparison, RepresentationMetrics
@@ -49,11 +50,14 @@ def test_task_specific_collectors_return_only_needed_outputs(monkeypatch, minima
 
     discovery = collect_discovery_outputs(trainer.components, tiny_loader, device=torch.device("cpu"), max_images=4)
     intervention = collect_intervention_outputs(trainer.components, tiny_loader, device=torch.device("cpu"), max_images=4)
+    probe = collect_probe_outputs(trainer.components, tiny_loader, device=torch.device("cpu"), max_images=4)
 
     assert set(discovery) == {"flow_targets", "future_descriptors", "predicted_next", "labels", "indices"}
     assert set(intervention) == {"future_descriptors", "images", "logits", "labels", "indices"}
+    assert set(probe) == {"z", "local_features", "future_descriptors", "labels", "indices"}
     assert discovery["future_descriptors"].shape[0] == 4
     assert intervention["images"].shape[0] == 4
+    assert probe["z"].shape[0] == 4
 
 
 def test_aligned_mode_skips_phase_c_when_baseline_gate_fails(monkeypatch, aligned_config, tiny_loader):

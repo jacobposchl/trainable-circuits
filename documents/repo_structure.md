@@ -103,8 +103,7 @@ logging
 The supported notebook suite is:
 
 - `nb01_training_and_representation_metrics.ipynb`
-- `nb02_candidate_circuit_discovery_and_stability.ipynb`
-- `nb03_interventions_and_qualitative_analysis.ipynb`
+- `nb02_efficient_representation_and_circuit_validation.ipynb`
 
 Each notebook uses the current `flow_circuits` package and/or the `flow-*` CLIs only.
 

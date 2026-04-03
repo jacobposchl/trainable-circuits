@@ -21,8 +21,7 @@ The supported workflow is:
 These stages map onto the current notebook suite:
 
 - `nb01_training_and_representation_metrics.ipynb`
-- `nb02_candidate_circuit_discovery_and_stability.ipynb`
-- `nb03_interventions_and_qualitative_analysis.ipynb`
+- `nb02_efficient_representation_and_circuit_validation.ipynb`
 
 Each notebook is designed for Google Colab. The setup cell:
 
@@ -138,7 +137,7 @@ Use:
 flow-discover --checkpoint experiments/flow/resnet18_base/final.pt
 ```
 
-This stage is the primary input to Notebook 2.
+This remains the advanced exhaustive discovery path. The unified Notebook 2 now uses a smaller pilot-discovery workflow implemented through package APIs instead of calling `flow-discover`.
 
 ### 4. Intervention Summary
 
@@ -155,7 +154,7 @@ flow-intervene \
   --circuits experiments/flow/resnet18_base/candidate_circuits.json
 ```
 
-This stage supports the held-out causal specificity analysis and is the primary input to Notebook 3.
+This remains the advanced exhaustive intervention path. The unified Notebook 2 now uses a top-k pilot intervention workflow implemented through package APIs instead of calling `flow-intervene`.
 
 ## Notebook Roles
 
@@ -169,24 +168,15 @@ Use this notebook to:
 - compare the model against baselines
 - inspect a compact qualitative view of token-level outputs
 
-### Notebook 2: Candidate Circuit Discovery and Stability
+### Notebook 2: Efficient Representation and Circuit Validation
 
 Use this notebook to:
 
-- run or load candidate-circuit discovery
-- inspect active nodes, engagement profiles, centroids, and thresholds
-- summarize descriptive analyses such as active-node coverage and post hoc purity
-- inspect stability across already-generated discovery artifacts when available
-
-### Notebook 3: Interventions and Qualitative Analysis
-
-Use this notebook to:
-
-- load a checkpoint and candidate-circuit artifact
-- run or load held-out interventions
-- compare member vs control outcomes
-- inspect corrected significance values
-- visualize circuit footprints and intervention summaries
+- load `phase_b.pt` and `phase_c.pt`
+- run fast side-by-side validation experiments without retraining
+- compare neighbor agreement, activation decoding, pilot discovery, and top-k interventions
+- reuse notebook-local cached experiment outputs across Colab sessions
+- decide whether Phase C is promising enough to justify the exhaustive CLI workflow
 
 ## Interpreting Outputs
 
@@ -215,9 +205,9 @@ Treat these as characterization, not gatekeeping:
 
 1. Train `resnet18_base`
 2. Evaluate the resulting `final.pt`
-3. Run discovery on that checkpoint
-4. Run interventions on the discovered candidate circuits
-5. Repeat with `resnet18_aligned` only if the Base model is already healthy
+3. Train `resnet18_aligned` and keep both `phase_b.pt` and `phase_c.pt`
+4. Run `nb02_efficient_representation_and_circuit_validation.ipynb`
+5. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the efficient notebook indicates the aligned representation is promising
 
 ## Operational Notes
 

@@ -8,7 +8,7 @@ import hdbscan
 import numpy as np
 from sklearn.decomposition import PCA
 
-from flow_circuits.evaluation import bootstrap_mean_ci
+from flow_circuits.evaluation.metrics import bootstrap_mean_ci
 
 
 class CandidateCircuitDiscoverer:
@@ -45,16 +45,24 @@ class CandidateCircuitDiscoverer:
         dataset_indices: np.ndarray,
         labels: np.ndarray | None = None,
         progress_callback=None,
+        node_subset: list[list[int]] | list[tuple[int, int]] | None = None,
     ) -> dict:
         n_images, n_layers, n_cells, _ = future_descriptors.shape
         if progress_callback is not None:
-            progress_callback(stage="node_clustering_start", completed=0, total=int(n_layers * n_cells))
-        node_clusters = self._discover_node_clusters(future_descriptors, dataset_indices, progress_callback=progress_callback)
+            total_nodes = len(node_subset) if node_subset is not None else int(n_layers * n_cells)
+            progress_callback(stage="node_clustering_start", completed=0, total=int(total_nodes))
+        node_clusters = self._discover_node_clusters(
+            future_descriptors,
+            dataset_indices,
+            progress_callback=progress_callback,
+            node_subset=node_subset,
+        )
         if progress_callback is not None:
+            total_nodes = len(node_subset) if node_subset is not None else int(n_layers * n_cells)
             progress_callback(
                 stage="node_clustering_done",
-                completed=int(n_layers * n_cells),
-                total=int(n_layers * n_cells),
+                completed=int(total_nodes),
+                total=int(total_nodes),
                 n_node_clusters=len(node_clusters),
             )
         circuits = self._merge_node_clusters(
@@ -90,46 +98,50 @@ class CandidateCircuitDiscoverer:
         dataset_indices: np.ndarray,
         *,
         progress_callback=None,
+        node_subset: list[list[int]] | list[tuple[int, int]] | None = None,
     ) -> list[dict]:
         n_images, n_layers, n_cells, _ = future_descriptors.shape
         node_clusters = []
         n_min = max(self.min_cluster_size, int(np.ceil(self.min_cluster_fraction * n_images)))
         n_max = int(np.floor(self.max_cluster_fraction * n_images))
-        total_nodes = n_layers * n_cells
+        if node_subset is None:
+            nodes_to_scan = [(layer_idx, cell_idx) for layer_idx in range(n_layers) for cell_idx in range(n_cells)]
+        else:
+            nodes_to_scan = [(int(layer_idx), int(cell_idx)) for layer_idx, cell_idx in node_subset]
+        total_nodes = len(nodes_to_scan)
         completed_nodes = 0
-        for layer_idx in range(n_layers):
-            for cell_idx in range(n_cells):
-                descriptors = future_descriptors[:, layer_idx, cell_idx, :]
-                prepared_descriptors = self._prepare_descriptors(descriptors)
-                labels = self._cluster_prepared_descriptors(prepared_descriptors)
-                for cluster_id in sorted(set(labels.tolist())):
-                    if cluster_id == -1:
-                        continue
-                    members = np.flatnonzero(labels == cluster_id)
-                    if not (n_min <= members.size <= n_max):
-                        continue
-                    stability = self._bootstrap_stability(prepared_descriptors, members)
-                    if stability < self.stability_threshold:
-                        continue
-                    node_clusters.append(
-                        {
-                            "node": [int(layer_idx), int(cell_idx)],
-                            "image_set": dataset_indices[members].tolist(),
-                            "row_indices": members.tolist(),
-                            "size": int(members.size),
-                            "stability": float(stability),
-                        }
-                    )
-                completed_nodes += 1
-                if progress_callback is not None:
-                    progress_callback(
-                        stage="node_clustering",
-                        completed=completed_nodes,
-                        total=total_nodes,
-                        layer_idx=int(layer_idx),
-                        cell_idx=int(cell_idx),
-                        n_node_clusters=len(node_clusters),
-                    )
+        for layer_idx, cell_idx in nodes_to_scan:
+            descriptors = future_descriptors[:, layer_idx, cell_idx, :]
+            prepared_descriptors = self._prepare_descriptors(descriptors)
+            labels = self._cluster_prepared_descriptors(prepared_descriptors)
+            for cluster_id in sorted(set(labels.tolist())):
+                if cluster_id == -1:
+                    continue
+                members = np.flatnonzero(labels == cluster_id)
+                if not (n_min <= members.size <= n_max):
+                    continue
+                stability = self._bootstrap_stability(prepared_descriptors, members)
+                if stability < self.stability_threshold:
+                    continue
+                node_clusters.append(
+                    {
+                        "node": [int(layer_idx), int(cell_idx)],
+                        "image_set": dataset_indices[members].tolist(),
+                        "row_indices": members.tolist(),
+                        "size": int(members.size),
+                        "stability": float(stability),
+                    }
+                )
+            completed_nodes += 1
+            if progress_callback is not None:
+                progress_callback(
+                    stage="node_clustering",
+                    completed=completed_nodes,
+                    total=total_nodes,
+                    layer_idx=int(layer_idx),
+                    cell_idx=int(cell_idx),
+                    n_node_clusters=len(node_clusters),
+                )
         return node_clusters
 
     def _prepare_descriptors(self, descriptors: np.ndarray) -> np.ndarray:

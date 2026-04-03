@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 
-from flow_circuits.evaluation import BaselineComparison
+from flow_circuits.evaluation.metrics import BaselineComparison
 from flow_circuits.utils import seed_everything
 
 

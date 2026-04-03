@@ -702,8 +702,7 @@ The repository implements the experimental workflow with four CLI stages:
 The first-class notebook suite mirrors these stages:
 
 - `notebooks/nb01_training_and_representation_metrics.ipynb`
-- `notebooks/nb02_candidate_circuit_discovery_and_stability.ipynb`
-- `notebooks/nb03_interventions_and_qualitative_analysis.ipynb`
+- `notebooks/nb02_efficient_representation_and_circuit_validation.ipynb`
 
 The standard artifact flow is:
 

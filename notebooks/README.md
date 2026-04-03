@@ -5,8 +5,7 @@ The notebooks in this repo are analysis and orchestration surfaces, not the prim
 ## Current Suite
 
 - `nb01_training_and_representation_metrics.ipynb`
-- `nb02_candidate_circuit_discovery_and_stability.ipynb`
-- `nb03_interventions_and_qualitative_analysis.ipynb`
+- `nb02_efficient_representation_and_circuit_validation.ipynb`
 
 ## Intended Role
 
@@ -17,6 +16,11 @@ Each notebook should:
 - reuse saved checkpoints and derived artifacts
 - call `flow_circuits` package APIs or `flow-*` CLIs
 - visualize or summarize results
+
+Current notebook roles:
+
+- `nb01`: training, evaluation, and representation-metric inspection
+- `nb02`: efficient Phase B vs Phase C validation across neighbor agreement, activation probes, pilot discovery, and top-k interventions
 
 Each notebook should not:
 

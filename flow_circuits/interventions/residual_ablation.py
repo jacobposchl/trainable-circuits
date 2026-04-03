@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from flow_circuits.evaluation import bootstrap_mean_ci
+from flow_circuits.evaluation.metrics import bootstrap_mean_ci
 from flow_circuits.training import LoadedFlowComponents
 
 
