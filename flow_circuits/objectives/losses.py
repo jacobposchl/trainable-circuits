@@ -145,30 +145,41 @@ class FlowObjective(nn.Module):
         tau: float,
     ) -> torch.Tensor:
         batch_size, n_layers, n_cells, _ = z.shape
+        max_k = min(topk, batch_size - 1)
+        if max_k <= 0:
+            return torch.zeros((), device=z.device)
+
         losses = []
+        non_self_mask = ~torch.eye(batch_size, dtype=torch.bool, device=z.device)
         for layer_idx in range(n_layers):
             for cell_idx in range(n_cells):
                 z_node = z[:, layer_idx, cell_idx, :]
                 q_node = future_descriptors[:, layer_idx, cell_idx, :]
                 q_sim = q_node @ q_node.T
                 z_sim = (z_node @ z_node.T) / tau
-                mask = ~torch.eye(batch_size, dtype=torch.bool, device=z.device)
-                z_sim = z_sim.masked_fill(~mask, float("-inf"))
+                z_sim = z_sim.masked_fill(~non_self_mask, float("-inf"))
+                valid = (q_sim >= gamma) & non_self_mask
+                if not bool(valid.any()):
+                    continue
 
-                for anchor_idx in range(batch_size):
-                    weights = q_sim[anchor_idx].clone()
-                    weights[anchor_idx] = -1.0
-                    valid = weights >= gamma
-                    if valid.sum() == 0:
-                        continue
-                    candidate_weights = weights.masked_fill(~valid, float("-inf"))
-                    n_keep = min(int(valid.sum().item()), topk)
-                    top_values, top_indices = torch.topk(candidate_weights, k=n_keep)
-                    pos_weights = torch.clamp(top_values, min=0.0)
-                    denom = torch.logsumexp(z_sim[anchor_idx], dim=0)
-                    numerators = z_sim[anchor_idx, top_indices]
-                    weighted = pos_weights * (numerators - denom)
-                    losses.append(-(weighted.sum() / pos_weights.sum().clamp_min(1.0e-8)))
+                candidate_weights = q_sim.masked_fill(~valid, float("-inf"))
+                top_values, top_indices = torch.topk(candidate_weights, k=max_k, dim=1)
+                finite_top = torch.isfinite(top_values)
+                pos_weights = torch.where(
+                    finite_top,
+                    torch.clamp(top_values, min=0.0),
+                    torch.zeros_like(top_values),
+                )
+                denom = torch.logsumexp(z_sim, dim=1, keepdim=True)
+                numerators = z_sim.gather(1, top_indices)
+                logits = torch.where(
+                    finite_top,
+                    numerators - denom,
+                    torch.zeros_like(numerators),
+                )
+                weighted = pos_weights * logits
+                per_anchor = -(weighted.sum(dim=1) / pos_weights.sum(dim=1).clamp_min(1.0e-8))
+                losses.append(per_anchor[valid.any(dim=1)])
         if not losses:
             return torch.zeros((), device=z.device)
-        return torch.stack(losses).mean()
+        return torch.cat(losses).mean()

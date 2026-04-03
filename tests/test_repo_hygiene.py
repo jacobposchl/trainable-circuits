@@ -109,6 +109,20 @@ def test_nb01_phase_c_schedule_matches_documented_modes():
     assert "effective_phase_epochs['phase_c'] = 0" in mode_cell_source
 
 
+def test_nb02_and_nb03_phase_c_schedule_matches_nb01_behavior():
+    for notebook_name in (
+        "nb02_candidate_circuit_discovery_and_stability.ipynb",
+        "nb03_interventions_and_qualitative_analysis.ipynb",
+    ):
+        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
+        mode_cell_source = "".join(data["cells"][5]["source"])
+
+        assert "import sys" in mode_cell_source
+        assert "'phase_c': 1" in mode_cell_source
+        assert "'phase_c': 5" in mode_cell_source
+        assert "effective_phase_epochs['phase_c'] = 0" in mode_cell_source
+
+
 def test_repo_text_has_no_legacy_runtime_references():
     offenders: list[str] = []
     for path in _iter_repo_text_files():
