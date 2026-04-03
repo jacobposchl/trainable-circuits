@@ -7,6 +7,8 @@ from pathlib import Path
 import hdbscan
 import numpy as np
 
+from flow_circuits.evaluation import bootstrap_mean_ci
+
 
 class CandidateCircuitDiscoverer:
     def __init__(
@@ -192,15 +194,17 @@ class CandidateCircuitDiscoverer:
 
             engagement_profile = {}
             engaged_nodes = []
+            checkable_count = 0
             for layer_idx, cell_idx in active_nodes:
                 if layer_idx >= engagement.shape[1]:
                     continue
+                checkable_count += 1
                 score = float(engagement[member_rows, layer_idx, cell_idx].mean())
                 threshold = float(mu[layer_idx, cell_idx] + sigma[layer_idx, cell_idx])
                 engagement_profile[f"{layer_idx}:{cell_idx}"] = score
                 if score >= threshold:
                     engaged_nodes.append((layer_idx, cell_idx))
-            if len(engaged_nodes) < max(1, len(active_nodes) // 2):
+            if len(engaged_nodes) < max(1, checkable_count // 2):
                 continue
             if not self._has_depth_path(engaged_nodes):
                 continue
@@ -278,10 +282,20 @@ class CandidateCircuitDiscoverer:
 
     @staticmethod
     def _has_depth_path(nodes: list[tuple[int, int]]) -> bool:
-        node_set = set(nodes)
+        layers_by_cell: dict[int, list[int]] = defaultdict(list)
         for layer_idx, cell_idx in nodes:
-            if (layer_idx + 1, cell_idx) in node_set:
-                return True
+            layers_by_cell[cell_idx].append(layer_idx)
+        for layers in layers_by_cell.values():
+            ordered = sorted(set(layers))
+            required_run_length = 3 if len(ordered) >= 3 else 2
+            run_length = 1
+            for left, right in zip(ordered, ordered[1:]):
+                if right == left + 1:
+                    run_length += 1
+                    if run_length >= required_run_length:
+                        return True
+                else:
+                    run_length = 1
         return False
 
 
@@ -292,3 +306,145 @@ def _jaccard(left: set[int], right: set[int]) -> float:
     if not union:
         return 0.0
     return len(left & right) / len(union)
+
+
+def summarize_seed_stability(
+    seed_runs: list[dict],
+    *,
+    bootstrap_iterations: int = 500,
+    seed: int = 0,
+) -> dict:
+    if not seed_runs:
+        return {"n_seed_runs": 0, "per_circuit": []}
+
+    reference = seed_runs[0]
+    comparison_runs = seed_runs[1:]
+    rng = np.random.default_rng(seed)
+    per_circuit = []
+    for circuit in reference["circuits"]:
+        observed_image_jaccards = []
+        observed_active_f1 = []
+        null_image_jaccards = []
+        null_active_f1 = []
+        for run in comparison_runs:
+            match = _match_circuit(circuit, run["circuits"])
+            if match is None:
+                continue
+            observed_image_jaccards.append(_jaccard(set(circuit["image_set"]), set(match["image_set"])))
+            observed_active_f1.append(_node_f1(circuit["active_nodes"], match["active_nodes"]))
+
+            null_candidate = _matched_null_circuit(circuit, run["circuits"], rng=rng)
+            if null_candidate is not None:
+                null_image_jaccards.append(_jaccard(set(circuit["image_set"]), set(null_candidate["image_set"])))
+                null_active_f1.append(_node_f1(circuit["active_nodes"], null_candidate["active_nodes"]))
+
+        n_observed = min(len(observed_image_jaccards), len(null_image_jaccards))
+        image_diff = (
+            np.asarray(observed_image_jaccards[:n_observed], dtype=np.float64)
+            - np.asarray(null_image_jaccards[:n_observed], dtype=np.float64)
+        )
+        active_diff = (
+            np.asarray(observed_active_f1[:n_observed], dtype=np.float64)
+            - np.asarray(null_active_f1[:n_observed], dtype=np.float64)
+        )
+        image_ci = bootstrap_mean_ci(image_diff, n_bootstrap=bootstrap_iterations, seed=seed) if image_diff.size else (0.0, 0.0)
+        active_ci = bootstrap_mean_ci(active_diff, n_bootstrap=bootstrap_iterations, seed=seed + 1) if active_diff.size else (0.0, 0.0)
+        per_circuit.append(
+            {
+                "circuit_id": int(circuit["id"]),
+                "n_matches": int(len(observed_image_jaccards)),
+                "mean_image_jaccard": float(np.mean(observed_image_jaccards)) if observed_image_jaccards else 0.0,
+                "mean_active_node_f1": float(np.mean(observed_active_f1)) if observed_active_f1 else 0.0,
+                "mean_null_image_jaccard": float(np.mean(null_image_jaccards)) if null_image_jaccards else 0.0,
+                "mean_null_active_node_f1": float(np.mean(null_active_f1)) if null_active_f1 else 0.0,
+                "image_jaccard_improvement_ci": [float(image_ci[0]), float(image_ci[1])],
+                "active_node_f1_improvement_ci": [float(active_ci[0]), float(active_ci[1])],
+                "stable": bool(image_ci[0] > 0.0 and active_ci[0] > 0.0),
+            }
+        )
+    return {
+        "n_seed_runs": int(len(seed_runs)),
+        "reference_seed": int(reference["seed"]),
+        "per_circuit": per_circuit,
+    }
+
+
+def run_node_shuffle_null(
+    *,
+    future_descriptors: np.ndarray,
+    predicted_next: np.ndarray,
+    flow_targets: np.ndarray,
+    dataset_indices: np.ndarray,
+    labels: np.ndarray | None,
+    discoverer_kwargs: dict,
+    seed: int,
+) -> dict:
+    rng = np.random.default_rng(seed)
+    n_layers = future_descriptors.shape[1]
+    n_cells = future_descriptors.shape[2]
+    permutation = rng.permutation(n_layers * n_cells)
+    shuffled = future_descriptors.reshape(future_descriptors.shape[0], n_layers * n_cells, future_descriptors.shape[-1])
+    shuffled = shuffled[:, permutation, :].reshape(future_descriptors.shape)
+    artifact = CandidateCircuitDiscoverer(**discoverer_kwargs, random_seed=seed).discover(
+        future_descriptors=shuffled,
+        predicted_next=predicted_next,
+        flow_targets=flow_targets,
+        dataset_indices=dataset_indices,
+        labels=labels,
+    )
+    return {
+        "seed": int(seed),
+        "n_node_clusters": int(len(artifact["node_clusters"])),
+        "n_circuits": int(len(artifact["circuits"])),
+    }
+
+
+def _match_circuit(reference_circuit: dict, candidate_circuits: list[dict]) -> dict | None:
+    representative_node = reference_circuit["representative_node"]
+    matching_candidates = [
+        candidate
+        for candidate in candidate_circuits
+        if candidate["representative_node"] == representative_node
+    ]
+    if not matching_candidates:
+        return None
+    rep_key = f"{representative_node[0]}:{representative_node[1]}"
+    reference_centroid = np.asarray(reference_circuit["centroids"][rep_key], dtype=np.float64)
+    return max(
+        matching_candidates,
+        key=lambda candidate: float(
+            np.dot(reference_centroid, np.asarray(candidate["centroids"].get(rep_key, reference_centroid), dtype=np.float64))
+        ),
+    )
+
+
+def _matched_null_circuit(reference_circuit: dict, candidate_circuits: list[dict], *, rng: np.random.Generator) -> dict | None:
+    if not candidate_circuits:
+        return None
+    reference_node_count = len(reference_circuit["active_nodes"])
+    reference_image_count = len(reference_circuit["image_set"])
+    ordered = sorted(
+        candidate_circuits,
+        key=lambda candidate: (
+            abs(len(candidate["active_nodes"]) - reference_node_count),
+            abs(len(candidate["image_set"]) - reference_image_count),
+            candidate["id"],
+        ),
+    )
+    shortlist = ordered[: max(1, min(3, len(ordered)))]
+    return shortlist[int(rng.integers(0, len(shortlist)))]
+
+
+def _node_f1(left_nodes: list[list[int]], right_nodes: list[list[int]]) -> float:
+    left_set = {tuple(node) for node in left_nodes}
+    right_set = {tuple(node) for node in right_nodes}
+    if not left_set and not right_set:
+        return 1.0
+    if not left_set or not right_set:
+        return 0.0
+    true_positive = len(left_set & right_set)
+    precision = true_positive / len(right_set)
+    recall = true_positive / len(left_set)
+    if precision + recall == 0.0:
+        return 0.0
+    return (2.0 * precision * recall) / (precision + recall)

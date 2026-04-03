@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import random
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, Subset
 from torchvision import transforms
@@ -51,6 +53,12 @@ def _split_indices(seed: int) -> dict[str, list[int]]:
     }
 
 
+def _seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % (2**32)
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+
+
 def build_cifar10_splits(
     *,
     data_dir: str,
@@ -64,13 +72,16 @@ def build_cifar10_splits(
     train_eval = CIFAR10(data_dir, train=True, download=download, transform=cifar10_transforms(False))
     test_ds = CIFAR10(data_dir, train=False, download=download, transform=cifar10_transforms(False))
     split_indices = _split_indices(seed)
+    fit_generator = torch.Generator().manual_seed(seed)
 
     fit_loader = DataLoader(
         IndexedDataset(train_aug, split_indices["fit"]),
         batch_size=batch_size,
         shuffle=True,
+        generator=fit_generator,
         num_workers=num_workers,
         pin_memory=True,
+        worker_init_fn=_seed_worker,
     )
     val_loader = DataLoader(
         IndexedDataset(train_eval, split_indices["val"]),
@@ -78,6 +89,7 @@ def build_cifar10_splits(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        worker_init_fn=_seed_worker,
     )
     discovery_loader = DataLoader(
         IndexedDataset(train_eval, split_indices["discovery"]),
@@ -85,6 +97,7 @@ def build_cifar10_splits(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        worker_init_fn=_seed_worker,
     )
     test_loader = DataLoader(
         IndexedDataset(test_ds),
@@ -92,6 +105,7 @@ def build_cifar10_splits(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        worker_init_fn=_seed_worker,
     )
     return {
         "fit": fit_loader,

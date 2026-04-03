@@ -53,6 +53,11 @@ The project is therefore strongest if it first succeeds as a predictive represen
 
 The backbone `B` is a pretrained ResNet18 for CIFAR-10 with all parameters frozen. No gradients flow into `B` at any point.
 
+Operational requirement:
+
+- canonical experiment configs must set `backbone.weights_path` to a supervised CIFAR-10 checkpoint for the chosen ResNet architecture
+- the code should fail loudly rather than silently constructing an untrained classifier head for intervention metrics
+
 Let `h_0(x)` denote the output of the ResNet stem for image `x`. For BasicBlock `l = 1, ..., L` with `L = 8`:
 
 ```text
@@ -622,7 +627,7 @@ Optionally train a separate decoder from `z_{l,i}` to the image patch correspond
 
 To ensure the method is not exploiting trivial shortcuts, run the following nulls:
 
-- **Future-shuffle null:** shuffle next-layer targets across images within node `(l, i)` and retrain the prediction head. Prediction performance should collapse.
+- **Future-shuffle null:** shuffle next-layer targets across images within node `(l, i)` when scoring the learned decoder. Prediction performance should collapse relative to the unshuffled target pairing.
 - **Depth-order null:** permute the order of future-flow blocks inside `g_{l,i}` before forming `q_{l,i}`. If P2 is unchanged, the trajectory descriptor is not using temporal order.
 - **Node-shuffle null:** shuffle node labels during discovery. Stable circuits should disappear.
 

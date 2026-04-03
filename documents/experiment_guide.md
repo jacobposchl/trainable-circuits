@@ -46,6 +46,8 @@ Labels are not used during representation learning or candidate-circuit discover
 
 There are two supported training modes:
 
+Before either mode is run, set `backbone.weights_path` in the chosen config to a supervised CIFAR-10 checkpoint for the frozen ResNet backbone. Canonical configs now fail loudly if that checkpoint is not provided.
+
 ### Base
 
 - Phase A: `L_pred`
@@ -95,6 +97,8 @@ Important outputs:
 
 - representation metrics
 - baseline comparison
+- confirmatory checks with bootstrap confidence intervals
+- evaluation null checks
 
 Use:
 
@@ -113,7 +117,8 @@ This stage supports the P1/P2-facing checks described in `project_context.md`.
 - candidate circuits
 - centroids
 - thresholds
-- stability statistics
+- multi-seed stability statistics
+- discovery null-check summaries
 
 Use:
 
@@ -181,6 +186,8 @@ Treat these as the main checks:
 - latent geometry alignment to external future similarity
 - candidate-circuit stability
 - held-out causal specificity
+
+The evaluation and discovery artifacts now include the confirmatory/statistical summaries needed to support these checks directly.
 
 ### Descriptive Analyses
 

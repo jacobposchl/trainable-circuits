@@ -39,6 +39,7 @@ class FrozenResNetObserver(nn.Module):
         num_classes: int = 10,
         grid_size: int = 4,
         weights_path: str | None = None,
+        require_trained_checkpoint: bool = False,
     ) -> None:
         super().__init__()
         if arch not in {"resnet18", "resnet34", "resnet50"}:
@@ -46,11 +47,15 @@ class FrozenResNetObserver(nn.Module):
 
         self.arch = arch
         self.grid_size = grid_size
+        self.weights_path = weights_path
+        self.require_trained_checkpoint = require_trained_checkpoint
+        self.classifier_is_trained = False
         self.model, self.blocks, self.flow_modules, self.layer_names = self._build_model(
             arch=arch,
             pretrained=pretrained,
             num_classes=num_classes,
             weights_path=weights_path,
+            require_trained_checkpoint=require_trained_checkpoint,
         )
         self.layer_channels = [self._block_out_channels(block) for block in self.blocks]
         self.requires_grad_(False)
@@ -98,36 +103,47 @@ class FrozenResNetObserver(nn.Module):
     def forward(self, x: torch.Tensor) -> ResNetObservations:
         return self.observe(x)
 
+    def require_semantic_logits(self) -> None:
+        if self.classifier_is_trained:
+            return
+        raise RuntimeError(
+            "Backbone logits are not scientifically valid for causal metrics because the classifier "
+            "head was not loaded from a trained checkpoint. Provide backbone.weights_path pointing "
+            "to a supervised CIFAR-style checkpoint or disable logit-based intervention claims."
+        )
+
     def _build_model(
         self,
         arch: str,
         pretrained: bool,
         num_classes: int,
         weights_path: str | None,
+        require_trained_checkpoint: bool,
     ) -> tuple[nn.Module, list[nn.Module], list[nn.Module], list[str]]:
         weights = "IMAGENET1K_V1" if pretrained else None
         model: nn.Module = getattr(tvm, arch)(weights=weights)
 
+        model = self._adapt_for_cifar(model, pretrained=pretrained, num_classes=num_classes)
+
         if weights_path:
-            state_dict = torch.load(Path(weights_path), map_location="cpu", weights_only=False)
-            if "state_dict" in state_dict:
-                state_dict = state_dict["state_dict"]
+            state_dict = _load_checkpoint_state_dict(Path(weights_path))
             missing, unexpected = model.load_state_dict(state_dict, strict=False)
             if unexpected:
-                raise ValueError(f"Unexpected keys in weights_path: {unexpected}")
+                raise ValueError(f"Unexpected keys in weights_path: {sorted(unexpected)}")
             if missing:
-                # Allow classifier replacement below to leave fc keys missing.
-                missing = [key for key in missing if not key.startswith("fc.")]
-                if missing:
-                    raise ValueError(f"Missing keys in weights_path: {missing}")
+                raise ValueError(f"Missing keys in weights_path: {sorted(missing)}")
+            self.classifier_is_trained = True
+        elif pretrained and model.fc.out_features == 1000:
+            # If the classifier head is preserved from torchvision weights, logits
+            # remain semantically valid for ImageNet-style checkpoints.
+            self.classifier_is_trained = True
+        elif require_trained_checkpoint:
+            raise ValueError(
+                "This config requires a trained supervised backbone checkpoint, but "
+                "backbone.weights_path is not set. Canonical CIFAR-10 runs must load "
+                "a checkpoint whose classifier head was trained on the target labels."
+            )
 
-        in_features = model.fc.in_features
-        model.fc = nn.Linear(in_features, num_classes)
-        stem = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-        if pretrained:
-            with torch.no_grad():
-                stem.weight.copy_(_resize_stem(model.conv1.weight.data))
-        model.conv1 = stem
         model.maxpool = nn.Identity()
 
         blocks: list[nn.Module] = []
@@ -142,7 +158,49 @@ class FrozenResNetObserver(nn.Module):
         return model, blocks, flow_modules, layer_names
 
     @staticmethod
+    def _adapt_for_cifar(model: nn.Module, *, pretrained: bool, num_classes: int) -> nn.Module:
+        in_features = model.fc.in_features
+        if model.fc.out_features != num_classes:
+            model.fc = nn.Linear(in_features, num_classes)
+
+        if (
+            model.conv1.kernel_size != (3, 3)
+            or model.conv1.stride != (1, 1)
+            or model.conv1.padding != (1, 1)
+        ):
+            stem = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            if pretrained:
+                with torch.no_grad():
+                    stem.weight.copy_(_resize_stem(model.conv1.weight.data))
+            model.conv1 = stem
+        return model
+
+    @staticmethod
     def _block_out_channels(block: nn.Module) -> int:
         if hasattr(block, "bn3"):
             return int(block.bn3.num_features)
         return int(block.bn2.num_features)
+
+
+def _load_checkpoint_state_dict(path: Path) -> dict[str, torch.Tensor]:
+    if not path.exists():
+        raise FileNotFoundError(f"Backbone checkpoint not found: {path}")
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    state_dict = _extract_state_dict(checkpoint)
+    for prefix in ("module.", "model.", "backbone."):
+        if state_dict and all(key.startswith(prefix) for key in state_dict):
+            state_dict = {key[len(prefix):]: value for key, value in state_dict.items()}
+    return state_dict
+
+
+def _extract_state_dict(checkpoint) -> dict[str, torch.Tensor]:
+    if isinstance(checkpoint, dict):
+        tensor_items = {key: value for key, value in checkpoint.items() if isinstance(value, torch.Tensor)}
+        if tensor_items:
+            return tensor_items
+        for key in ("state_dict", "model_state_dict", "model", "net", "backbone"):
+            if key in checkpoint:
+                candidate = checkpoint[key]
+                if isinstance(candidate, dict):
+                    return _extract_state_dict(candidate)
+    raise ValueError("Unable to locate a tensor state_dict in the provided backbone checkpoint.")

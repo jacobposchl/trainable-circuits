@@ -15,6 +15,7 @@ backbone:
   pretrained: true
   num_classes: 10
   weights_path: null
+  require_trained_checkpoint: true
 
 tokenization:
   grid_size: 4
@@ -47,8 +48,15 @@ training:
     phase_c: 0
   baseline_fit_images: 2048
   baseline_eval_images: 2048
+  baseline_hidden_dim: 256
+  baseline_epochs: 10
+  baseline_batch_size: 1024
+  baseline_lr: 1.0e-3
+  baseline_weight_decay: 1.0e-4
   validation_images: 1024
+  test_evaluation_images: null
   alignment_max_pairs: 4096
+  confirmatory_bootstrap_iterations: 500
 
 discovery:
   min_cluster_fraction: 0.005
@@ -59,6 +67,9 @@ discovery:
   merge_threshold: 0.70
   node_threshold: 0.70
   seed: 0
+  seeds: [0, 1, 2, 3, 4]
+  stability_bootstrap_iterations: 500
+  node_shuffle_seed: 101
   max_images: null
 
 interventions:

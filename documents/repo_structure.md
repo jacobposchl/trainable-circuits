@@ -34,26 +34,26 @@ This repository is organized around the `flow_circuits/` package and the current
 
 | File | Purpose |
 |---|---|
-| `baselines.py` | Fits and evaluates `B_mean`, `B_local`, and `B_flow` baselines used for P1 comparison and Phase C gating. |
+| `baselines.py` | Fits and evaluates node-wise mean, local-MLP, and flow-MLP baselines used for P1 comparison and Phase C gating. |
 | `trainer.py` | `FlowCircuitTrainer`, checkpoint loading, staged training, validation metric collection, and artifact-oriented output assembly. |
 
 ### `flow_circuits/discovery/`
 
 | File | Purpose |
 |---|---|
-| `candidate_discovery.py` | `CandidateCircuitDiscoverer`: node-wise HDBSCAN clustering on `q_{l,i}`, bootstrap stability filtering, cluster-family merge, connectivity pruning, engagement filtering, centroid/threshold persistence. |
+| `candidate_discovery.py` | `CandidateCircuitDiscoverer`: node-wise HDBSCAN clustering on `q_{l,i}`, bootstrap stability filtering, cluster-family merge, connectivity pruning, centroid/threshold persistence, multi-seed stability summaries, and node-shuffle nulls. |
 
 ### `flow_circuits/evaluation/`
 
 | File | Purpose |
 |---|---|
-| `metrics.py` | Confirmatory/descriptive representation metrics, including one-step prediction summaries, reconstruction summaries, and external trajectory alignment. |
+| `metrics.py` | Confirmatory/descriptive representation metrics, including one-step prediction summaries, same-split baseline comparisons, bootstrap confidence intervals, and external trajectory alignment against raw pooled-state and raw flow baselines. |
 
 ### `flow_circuits/interventions/`
 
 | File | Purpose |
 |---|---|
-| `residual_ablation.py` | `ResidualPatchAblator`, held-out circuit assignment, matched control selection, residual-patch ablation, and intervention summary generation. |
+| `residual_ablation.py` | `ResidualPatchAblator`, held-out circuit assignment, matched control selection, layer-matched random controls, residual-patch ablation, and intervention summary generation with confidence intervals. |
 
 ### `flow_circuits/data/`
 

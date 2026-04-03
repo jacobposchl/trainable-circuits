@@ -8,6 +8,7 @@ from pathlib import Path
 from flow_circuits.data import build_cifar10_splits
 from flow_circuits.interventions import run_circuit_interventions
 from flow_circuits.training import collect_model_outputs, load_components_from_checkpoint
+from flow_circuits.utils import seed_everything
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +26,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     components = load_components_from_checkpoint(args.checkpoint, device=device)
     config = components.config
+    seed_everything(config["data"].get("seed", 0))
     loaders = build_cifar10_splits(
         data_dir=config["data"]["data_dir"],
         batch_size=config["data"]["batch_size"],

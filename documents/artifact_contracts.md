@@ -58,17 +58,23 @@ Typical filename:
 Current required top-level fields:
 
 - `split`
+- `n_images`
 - `representation_metrics`
 - `baseline_comparison`
+- `confirmatory_checks`
+- `null_checks`
 
 `representation_metrics` currently includes:
 
+- `n_images`
 - `prediction_cosine_mean`
 - `prediction_cosine_sem`
 - `reconstruction_cosine_mean`
 - `reconstruction_cosine_sem`
 - `trajectory_alignment_mean`
 - `trajectory_alignment_std`
+- `local_trajectory_alignment_mean`
+- `flow_trajectory_alignment_mean`
 
 `baseline_comparison` currently includes:
 
@@ -76,6 +82,27 @@ Current required top-level fields:
 - `local_baseline`
 - `flow_baseline`
 - `best_baseline`
+- `best_baseline_name`
+
+`confirmatory_checks` currently includes:
+
+- `p1_prediction_vs_best_baseline`
+- `p2_alignment_vs_best_baseline`
+
+Each confirmatory check currently includes:
+
+- `model_value`
+- `baseline_value`
+- `baseline_name`
+- `improvement`
+- `ci_lower`
+- `ci_upper`
+- `passes`
+
+`null_checks` currently includes:
+
+- `future_shuffle_prediction`
+- `depth_order_alignment`
 
 ## 3. Candidate-Circuit Artifact JSON
 
@@ -93,6 +120,9 @@ Current required top-level fields:
 - `metadata`
 - `node_clusters`
 - `circuits`
+- `seed_runs`
+- `stability_summary`
+- `null_checks`
 
 `metadata` currently includes:
 
@@ -101,6 +131,7 @@ Current required top-level fields:
 - `n_cells`
 - `grid_size`
 - `random_seed`
+- `discovery_seeds`
 
 Each `node_clusters` item currently includes:
 
@@ -121,6 +152,34 @@ Each `circuits` item currently includes:
 - `thresholds`
 - `stability`
 - `purity`
+
+Each `seed_runs` item currently includes:
+
+- `seed`
+- `node_clusters`
+- `circuits`
+
+`stability_summary` currently includes:
+
+- `n_seed_runs`
+- `reference_seed`
+- `per_circuit`
+
+Each `stability_summary.per_circuit` item currently includes:
+
+- `circuit_id`
+- `n_matches`
+- `mean_image_jaccard`
+- `mean_active_node_f1`
+- `mean_null_image_jaccard`
+- `mean_null_active_node_f1`
+- `image_jaccard_improvement_ci`
+- `active_node_f1_improvement_ci`
+- `stable`
+
+`null_checks` currently includes:
+
+- `node_shuffle`
 
 Contract notes:
 
@@ -149,13 +208,20 @@ Each result currently includes:
 - `n_members`
 - `n_controls`
 - `mean_member_delta_margin`
+- `mean_member_delta_true`
 - `mean_nonmember_delta_margin`
+- `mean_nonmember_delta_true`
 - `mean_random_node_delta_margin`
 - `mean_random_cell_delta_margin`
 - `p_member_vs_nonmember`
 - `p_member_vs_random_node`
+- `p_member_vs_random_cell`
 - `corrected_p_member_vs_nonmember`
 - `corrected_p_member_vs_random_node`
+- `corrected_p_member_vs_random_cell`
+- `ci_member_vs_nonmember`
+- `ci_member_vs_random_node`
+- `ci_member_vs_random_cell`
 - `validated`
 
 ## 5. Intervention Summary CSV

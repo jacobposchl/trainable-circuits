@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 import torch
 
 from flow_circuits.backbones import FrozenResNetObserver
@@ -25,6 +26,16 @@ def test_resnet34_and_resnet50_metadata_are_supported():
     assert len(resnet34.layer_channels) == 16
     assert len(resnet50.layer_channels) == 16
     assert resnet50.layer_channels[-1] == 2048
+
+
+def test_observer_requires_trained_checkpoint_when_requested():
+    with pytest.raises(ValueError, match="requires a trained supervised backbone checkpoint"):
+        FrozenResNetObserver(
+            arch="resnet18",
+            pretrained=False,
+            num_classes=10,
+            require_trained_checkpoint=True,
+        )
 
 
 def test_tokenizer_builds_tokens_targets_and_future_descriptors():

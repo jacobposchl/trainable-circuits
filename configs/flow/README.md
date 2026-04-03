@@ -55,6 +55,7 @@ These fields are the most common to change during development:
 
 ## Guidance
 
+- canonical configs require `backbone.weights_path` to be set to a supervised CIFAR-10 checkpoint before use
 - prefer notebook-local derived configs for quick-mode experimentation
 - keep canonical configs stable and readable
 - if you add a new canonical config, update this file and the experiment guide

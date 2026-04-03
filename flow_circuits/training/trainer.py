@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import asdict, dataclass
+import itertools
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +19,7 @@ from flow_circuits.evaluation import RepresentationMetrics, evaluate_representat
 from flow_circuits.objectives import FlowObjective
 from flow_circuits.tokenization import FlowTokenizer
 from flow_circuits.training.baselines import BaselineRegressors
+from flow_circuits.utils import seed_everything
 
 
 @dataclass
@@ -42,6 +44,7 @@ def build_components(config: dict, device: torch.device) -> LoadedFlowComponents
         num_classes=bcfg.get("num_classes", 10),
         grid_size=tcfg.get("grid_size", 4),
         weights_path=bcfg.get("weights_path"),
+        require_trained_checkpoint=bcfg.get("require_trained_checkpoint", False),
     ).to(device)
     tokenizer = FlowTokenizer(
         layer_channels=observer.layer_channels,
@@ -105,6 +108,7 @@ def collect_model_outputs(
 ) -> dict[str, torch.Tensor]:
     outputs = {
         "z": [],
+        "local_features": None,
         "flow_targets": [],
         "future_descriptors": [],
         "predicted_next": [],
@@ -120,6 +124,10 @@ def collect_model_outputs(
             device_images = images.to(device)
             tokenized, z, objective_output = _forward_pass(components, device_images, lambda_rec=1.0, lambda_traj=0.0)
             outputs["z"].append(z.cpu())
+            if outputs["local_features"] is None:
+                outputs["local_features"] = [[] for _ in tokenized.local_features]
+            for layer_idx, layer_features in enumerate(tokenized.local_features):
+                outputs["local_features"][layer_idx].append(layer_features.cpu())
             outputs["flow_targets"].append(tokenized.flow_targets.cpu())
             outputs["future_descriptors"].append(tokenized.future_descriptors.cpu())
             outputs["predicted_next"].append(objective_output.predicted_next.cpu())
@@ -136,15 +144,60 @@ def collect_model_outputs(
     for key, value in outputs.items():
         if not value:
             continue
+        if key == "local_features":
+            continue
         outputs[key] = torch.cat(value, dim=0)
         if max_images is not None:
             outputs[key] = outputs[key][:max_images]
+    if outputs["local_features"]:
+        concatenated_features = []
+        for values in outputs["local_features"]:
+            layer_tensor = torch.cat(values, dim=0)
+            if max_images is not None:
+                layer_tensor = layer_tensor[:max_images]
+            concatenated_features.append(layer_tensor)
+        outputs["local_features"] = concatenated_features
     return outputs
+
+
+def collect_baseline_features(
+    components: LoadedFlowComponents,
+    loader,
+    *,
+    device: torch.device,
+    max_images: int | None = None,
+) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+    locals_by_layer: list[list[np.ndarray]] | None = None
+    flows_by_layer: list[list[np.ndarray]] | None = None
+    next_by_layer: list[list[np.ndarray]] | None = None
+    seen = 0
+    with torch.no_grad():
+        for images, _, _ in loader:
+            images = images.to(device)
+            observations = components.observer(images)
+            tokenized = components.tokenizer(observations)
+            if locals_by_layer is None:
+                locals_by_layer = [[] for _ in range(tokenized.flow_targets.shape[1] - 1)]
+                flows_by_layer = [[] for _ in range(tokenized.flow_targets.shape[1] - 1)]
+                next_by_layer = [[] for _ in range(tokenized.flow_targets.shape[1] - 1)]
+            for layer_idx in range(tokenized.flow_targets.shape[1] - 1):
+                locals_by_layer[layer_idx].append(tokenized.local_features[layer_idx].cpu().numpy())
+                flows_by_layer[layer_idx].append(tokenized.flow_targets[:, layer_idx].cpu().numpy())
+                next_by_layer[layer_idx].append(tokenized.flow_targets[:, layer_idx + 1].cpu().numpy())
+            seen += images.shape[0]
+            if max_images is not None and seen >= max_images:
+                break
+    return (
+        [np.concatenate(values, axis=0) for values in locals_by_layer or []],
+        [np.concatenate(values, axis=0) for values in flows_by_layer or []],
+        [np.concatenate(values, axis=0) for values in next_by_layer or []],
+    )
 
 
 class FlowCircuitTrainer:
     def __init__(self, config: dict) -> None:
         self.config = config
+        seed_everything(config["data"].get("seed", 0))
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.components = build_components(config, self.device)
         self.loaders = build_cifar10_splits(
@@ -165,8 +218,9 @@ class FlowCircuitTrainer:
             lr=config["training"].get("lr", 1.0e-3),
             weight_decay=config["training"].get("weight_decay", 1.0e-4),
         )
-        total_epochs = sum(config["training"]["phase_epochs"].values())
-        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(total_epochs, 1))
+        _pe = config["training"]["phase_epochs"]
+        ab_epochs = _pe.get("phase_a", 0) + _pe.get("phase_b", 0)
+        self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(ab_epochs, 1))
 
     def train(self) -> dict:
         history = []
@@ -315,49 +369,40 @@ class FlowCircuitTrainer:
             local_features=local_features,
             flow_features=flow_features,
             next_targets=next_targets,
-            alpha=self.config["training"].get("baseline_ridge_alpha", 1.0),
+            hidden_dim=self.config["training"].get("baseline_hidden_dim"),
+            epochs=self.config["training"].get("baseline_epochs", 10),
+            batch_size=self.config["training"].get("baseline_batch_size", 1024),
+            lr=self.config["training"].get("baseline_lr", 1.0e-3),
+            weight_decay=self.config["training"].get("baseline_weight_decay", 1.0e-4),
+            seed=self.config["data"].get("seed", 0),
+            device=self.device,
         )
 
-    def _evaluate_baselines(self, regressors: BaselineRegressors):
-        max_images = self.config["training"].get("baseline_eval_images", 1024)
-        local_features, flow_features, next_targets = self._collect_baseline_features(self.loaders["val"], max_images=max_images)
+    def _evaluate_baselines(self, regressors: BaselineRegressors, *, loader=None, max_images: int | None = None):
+        loader = loader or self.loaders["val"]
+        if max_images is None:
+            max_images = self.config["training"].get("baseline_eval_images", 1024)
+        local_features, flow_features, next_targets = self._collect_baseline_features(loader, max_images=max_images)
         return regressors.evaluate(
             local_features=local_features,
             flow_features=flow_features,
             next_targets=next_targets,
         )
 
-    def _collect_baseline_features(self, loader, *, max_images: int) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
-        locals_by_layer: list[list[np.ndarray]] | None = None
-        flows_by_layer: list[list[np.ndarray]] | None = None
-        next_by_layer: list[list[np.ndarray]] | None = None
-        seen = 0
-        with torch.no_grad():
-            for images, _, _ in loader:
-                images = images.to(self.device)
-                observations = self.components.observer(images)
-                tokenized = self.components.tokenizer(observations)
-                if locals_by_layer is None:
-                    locals_by_layer = [[] for _ in range(tokenized.flow_targets.shape[1] - 1)]
-                    flows_by_layer = [[] for _ in range(tokenized.flow_targets.shape[1] - 1)]
-                    next_by_layer = [[] for _ in range(tokenized.flow_targets.shape[1] - 1)]
-                for layer_idx in range(tokenized.flow_targets.shape[1] - 1):
-                    locals_by_layer[layer_idx].append(
-                        tokenized.local_features[layer_idx].reshape(-1, tokenized.local_features[layer_idx].shape[-1]).cpu().numpy()
-                    )
-                    flows_by_layer[layer_idx].append(
-                        tokenized.flow_targets[:, layer_idx].reshape(-1, tokenized.flow_targets.shape[-1]).cpu().numpy()
-                    )
-                    next_by_layer[layer_idx].append(
-                        tokenized.flow_targets[:, layer_idx + 1].reshape(-1, tokenized.flow_targets.shape[-1]).cpu().numpy()
-                    )
-                seen += images.shape[0]
-                if seen >= max_images:
-                    break
-        return (
-            [np.concatenate(values, axis=0) for values in locals_by_layer or []],
-            [np.concatenate(values, axis=0) for values in flows_by_layer or []],
-            [np.concatenate(values, axis=0) for values in next_by_layer or []],
+    def _score_baselines(self, regressors: BaselineRegressors, *, loader, max_images: int) -> dict[str, np.ndarray]:
+        local_features, flow_features, next_targets = self._collect_baseline_features(loader, max_images=max_images)
+        return regressors.score_predictions(
+            local_features=local_features,
+            flow_features=flow_features,
+            next_targets=next_targets,
+        )
+
+    def _collect_baseline_features(self, loader, *, max_images: int | None) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
+        return collect_baseline_features(
+            self.components,
+            loader,
+            device=self.device,
+            max_images=max_images,
         )
 
     def _full_validation_metrics(self, loader) -> RepresentationMetrics:
@@ -369,22 +414,39 @@ class FlowCircuitTrainer:
         )
         return evaluate_representation_metrics(
             outputs["z"],
+            outputs["local_features"],
             outputs["flow_targets"],
             outputs["future_descriptors"],
             outputs["predicted_next"],
             outputs["reconstructed_current"],
             max_alignment_pairs=self.config["training"].get("alignment_max_pairs", 2048),
+            alignment_seed=self.config["data"].get("seed", 0),
         )
 
     def _run_phase_c_sweep(self, *, phase_b_snapshot: dict, phase_b_metrics: RepresentationMetrics, epochs: int) -> dict:
         best_candidate = None
-        lambda_candidates = self.config["objectives"].get("lambda_traj_candidates", [0.1, 0.2, 0.5])
-        for lambda_traj in lambda_candidates:
+        ocfg = self.config["objectives"]
+        lambda_candidates = ocfg.get("lambda_traj_candidates", [0.1, 0.2, 0.5])
+        topk_candidates = ocfg.get("traj_topk_candidates", [ocfg.get("traj_topk", 8)])
+        gamma_candidates = ocfg.get("traj_gamma_candidates", [ocfg.get("traj_gamma", 0.2)])
+        tau_candidates = ocfg.get("traj_tau_candidates", [ocfg.get("traj_tau", 0.1)])
+
+        for lambda_traj, traj_topk, traj_gamma, traj_tau in itertools.product(
+            lambda_candidates, topk_candidates, gamma_candidates, tau_candidates
+        ):
             self._restore_snapshot(phase_b_snapshot)
+            # Fresh cosine schedule for each Phase C candidate so it decays
+            # over phase_c epochs rather than inheriting Phase A+B T_max.
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(epochs, 1))
+            # Temporarily override per-candidate trajectory hyperparameters so
+            # _run_epoch picks them up from self.config.
+            ocfg["traj_topk"] = traj_topk
+            ocfg["traj_gamma"] = traj_gamma
+            ocfg["traj_tau"] = traj_tau
             history = self._run_phase(
                 "phase_c",
                 epochs,
-                lambda_rec=self.config["objectives"].get("lambda_rec", 0.2),
+                lambda_rec=ocfg.get("lambda_rec", 0.2),
                 lambda_traj=lambda_traj,
             )
             metrics = self._full_validation_metrics(self.loaders["val"])
@@ -394,6 +456,9 @@ class FlowCircuitTrainer:
             )
             candidate = {
                 "lambda_traj": lambda_traj,
+                "traj_topk": traj_topk,
+                "traj_gamma": traj_gamma,
+                "traj_tau": traj_tau,
                 "accepted": accepted,
                 "history": history,
                 "metrics": metrics,
@@ -407,16 +472,28 @@ class FlowCircuitTrainer:
 
         if best_candidate is None:
             self._restore_snapshot(phase_b_snapshot)
+            # Restore Phase A+B scheduler so the final checkpoint is consistent.
+            _pe = self.config["training"]["phase_epochs"]
+            ab_epochs = _pe.get("phase_a", 0) + _pe.get("phase_b", 0)
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(ab_epochs, 1))
             return {
                 "accepted": False,
                 "reason": "no_phase_c_candidate_met_acceptance_rule",
                 "metrics": phase_b_metrics,
             }
 
+        # Persist the winning hyperparameters in config so the saved checkpoint
+        # is self-consistent.
+        ocfg["traj_topk"] = best_candidate["traj_topk"]
+        ocfg["traj_gamma"] = best_candidate["traj_gamma"]
+        ocfg["traj_tau"] = best_candidate["traj_tau"]
         self._restore_snapshot(best_candidate["snapshot"])
         return {
             "accepted": True,
             "lambda_traj": best_candidate["lambda_traj"],
+            "traj_topk": best_candidate["traj_topk"],
+            "traj_gamma": best_candidate["traj_gamma"],
+            "traj_tau": best_candidate["traj_tau"],
             "metrics": best_candidate["metrics"],
         }
 

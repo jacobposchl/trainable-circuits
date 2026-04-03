@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 
 import numpy as np
-from scipy.stats import permutation_test
 import torch
 
+from flow_circuits.evaluation import bootstrap_mean_ci
 from flow_circuits.training import LoadedFlowComponents
 
 
@@ -17,13 +17,20 @@ class InterventionResult:
     n_members: int
     n_controls: int
     mean_member_delta_margin: float
+    mean_member_delta_true: float
     mean_nonmember_delta_margin: float
+    mean_nonmember_delta_true: float
     mean_random_node_delta_margin: float
     mean_random_cell_delta_margin: float
     p_member_vs_nonmember: float
     p_member_vs_random_node: float
+    p_member_vs_random_cell: float
     corrected_p_member_vs_nonmember: float
     corrected_p_member_vs_random_node: float
+    corrected_p_member_vs_random_cell: float
+    ci_member_vs_nonmember: list[float]
+    ci_member_vs_random_node: list[float]
+    ci_member_vs_random_cell: list[float]
     validated: bool
 
     def to_dict(self) -> dict:
@@ -111,6 +118,7 @@ def run_circuit_interventions(
     alpha: float = 0.05,
     output_path: str | Path | None = None,
 ) -> list[InterventionResult]:
+    components.observer.require_semantic_logits()
     future_descriptors = test_outputs["future_descriptors"]
     dataset_indices = test_outputs["indices"]
     labels = test_outputs["labels"]
@@ -131,6 +139,7 @@ def run_circuit_interventions(
         member_before = logits[member_rows]
         member_after = ablator.ablate(member_images, [tuple(node) for node in circuit["active_nodes"]]).cpu()
         member_delta_margin = _margin(member_before) - _margin(member_after)
+        member_delta_true = _true_logit_delta(member_before, member_after, member_labels)
 
         control_rows = _matched_nonmembers(
             member_rows=member_rows,
@@ -140,15 +149,16 @@ def run_circuit_interventions(
             margins=margins,
         )
         if control_rows.numel() == 0:
-            control_rows = member_rows[: min(2, member_rows.numel())]
+            continue
         control_images = test_outputs["images"][control_rows].to(member_images.device)
+        control_labels = labels[control_rows]
         control_before = logits[control_rows]
         control_after = ablator.ablate(control_images, [tuple(node) for node in circuit["active_nodes"]]).cpu()
         control_delta_margin = _margin(control_before) - _margin(control_after)
+        control_delta_true = _true_logit_delta(control_before, control_after, control_labels)
 
         random_nodes = _random_nodes_like(
             [tuple(node) for node in circuit["active_nodes"]],
-            circuits_artifact["metadata"]["n_layers"],
             circuits_artifact["metadata"]["n_cells"],
             seed=int(circuit["id"]) + 17,
         )
@@ -163,39 +173,67 @@ def run_circuit_interventions(
         random_cell_after = ablator.ablate(member_images, random_cells).cpu()
         random_cell_delta_margin = _margin(member_before) - _margin(random_cell_after)
 
-        p_nonmember = _permutation_pvalue(member_delta_margin.numpy(), control_delta_margin.numpy())
-        p_random = _permutation_pvalue(member_delta_margin.numpy(), random_delta_margin.numpy())
+        member_vs_nonmember = (member_delta_margin[:control_delta_margin.shape[0]] - control_delta_margin).numpy()
+        member_vs_random = (member_delta_margin - random_delta_margin).numpy()
+        member_vs_random_cell = (member_delta_margin - random_cell_delta_margin).numpy()
+        p_nonmember = _paired_permutation_pvalue(member_vs_nonmember, seed=int(circuit["id"]) + 101)
+        p_random = _paired_permutation_pvalue(member_vs_random, seed=int(circuit["id"]) + 151)
+        p_random_cell = _paired_permutation_pvalue(member_vs_random_cell, seed=int(circuit["id"]) + 181)
+        ci_nonmember = bootstrap_mean_ci(member_vs_nonmember, n_bootstrap=500, seed=int(circuit["id"]) + 201)
+        ci_random = bootstrap_mean_ci(member_vs_random, n_bootstrap=500, seed=int(circuit["id"]) + 251)
+        ci_random_cell = bootstrap_mean_ci(member_vs_random_cell, n_bootstrap=500, seed=int(circuit["id"]) + 281)
         raw_results.append(
             {
                 "circuit_id": int(circuit["id"]),
                 "n_members": int(member_rows.numel()),
                 "n_controls": int(control_rows.numel()),
                 "mean_member_delta_margin": float(member_delta_margin.mean().item()),
+                "mean_member_delta_true": float(member_delta_true.mean().item()),
                 "mean_nonmember_delta_margin": float(control_delta_margin.mean().item()),
+                "mean_nonmember_delta_true": float(control_delta_true.mean().item()),
                 "mean_random_node_delta_margin": float(random_delta_margin.mean().item()),
                 "mean_random_cell_delta_margin": float(random_cell_delta_margin.mean().item()),
                 "p_member_vs_nonmember": float(p_nonmember),
                 "p_member_vs_random_node": float(p_random),
+                "p_member_vs_random_cell": float(p_random_cell),
+                "ci_member_vs_nonmember": [float(ci_nonmember[0]), float(ci_nonmember[1])],
+                "ci_member_vs_random_node": [float(ci_random[0]), float(ci_random[1])],
+                "ci_member_vs_random_cell": [float(ci_random_cell[0]), float(ci_random_cell[1])],
             }
         )
 
     corrected_nonmember = _holm([item["p_member_vs_nonmember"] for item in raw_results])
     corrected_random = _holm([item["p_member_vs_random_node"] for item in raw_results])
+    corrected_random_cell = _holm([item["p_member_vs_random_cell"] for item in raw_results])
     results = []
     for idx, item in enumerate(raw_results):
-        validated = corrected_nonmember[idx] < alpha and corrected_random[idx] < alpha
+        validated = (
+            corrected_nonmember[idx] < alpha
+            and corrected_random[idx] < alpha
+            and corrected_random_cell[idx] < alpha
+            and item["ci_member_vs_nonmember"][0] > 0.0
+            and item["ci_member_vs_random_node"][0] > 0.0
+            and item["ci_member_vs_random_cell"][0] > 0.0
+        )
         result = InterventionResult(
             circuit_id=item["circuit_id"],
             n_members=item["n_members"],
             n_controls=item["n_controls"],
             mean_member_delta_margin=item["mean_member_delta_margin"],
+            mean_member_delta_true=item["mean_member_delta_true"],
             mean_nonmember_delta_margin=item["mean_nonmember_delta_margin"],
+            mean_nonmember_delta_true=item["mean_nonmember_delta_true"],
             mean_random_node_delta_margin=item["mean_random_node_delta_margin"],
             mean_random_cell_delta_margin=item["mean_random_cell_delta_margin"],
             p_member_vs_nonmember=item["p_member_vs_nonmember"],
             p_member_vs_random_node=item["p_member_vs_random_node"],
+            p_member_vs_random_cell=item["p_member_vs_random_cell"],
             corrected_p_member_vs_nonmember=float(corrected_nonmember[idx]),
             corrected_p_member_vs_random_node=float(corrected_random[idx]),
+            corrected_p_member_vs_random_cell=float(corrected_random_cell[idx]),
+            ci_member_vs_nonmember=item["ci_member_vs_nonmember"],
+            ci_member_vs_random_node=item["ci_member_vs_random_node"],
+            ci_member_vs_random_cell=item["ci_member_vs_random_cell"],
             validated=validated,
         )
         results.append(result)
@@ -211,6 +249,13 @@ def run_circuit_interventions(
 def _margin(logits: torch.Tensor) -> torch.Tensor:
     top2 = torch.topk(logits, k=2, dim=1).values
     return top2[:, 0] - top2[:, 1]
+
+
+def _true_logit_delta(before: torch.Tensor, after: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    label_idx = labels.view(-1, 1)
+    before_true = before.gather(1, label_idx).squeeze(1)
+    after_true = after.gather(1, label_idx).squeeze(1)
+    return before_true - after_true
 
 
 def _matched_nonmembers(
@@ -238,9 +283,22 @@ def _matched_nonmembers(
     return torch.tensor(chosen, dtype=torch.long)
 
 
-def _random_nodes_like(nodes: list[tuple[int, int]], n_layers: int, n_cells: int, seed: int) -> list[tuple[int, int]]:
+def _random_nodes_like(nodes: list[tuple[int, int]], n_cells: int, seed: int) -> list[tuple[int, int]]:
     rng = np.random.default_rng(seed)
-    return [(rng.integers(0, n_layers), rng.integers(0, n_cells)) for _ in nodes]
+    nodes_by_layer: dict[int, list[int]] = {}
+    for layer_idx, cell_idx in nodes:
+        nodes_by_layer.setdefault(layer_idx, []).append(cell_idx)
+
+    random_nodes = []
+    for layer_idx, cell_indices in nodes_by_layer.items():
+        available = [cell for cell in range(n_cells) if cell not in cell_indices]
+        if len(available) >= len(cell_indices):
+            sampled = rng.choice(available, size=len(cell_indices), replace=False).tolist()
+        else:
+            fallback = available if available else list(range(n_cells))
+            sampled = rng.choice(fallback, size=len(cell_indices), replace=True).tolist()
+        random_nodes.extend((layer_idx, int(cell_idx)) for cell_idx in sampled)
+    return random_nodes
 
 
 def _same_layer_random_cells(nodes: list[tuple[int, int]], n_cells: int, seed: int) -> list[tuple[int, int]]:
@@ -258,12 +316,16 @@ def _bounds(size: int, idx: int, n_bins: int) -> tuple[int, int]:
     return start, max(end, start + 1)
 
 
-def _permutation_pvalue(left: np.ndarray, right: np.ndarray) -> float:
-    if left.size < 2 or right.size < 2:
+def _paired_permutation_pvalue(differences: np.ndarray, *, seed: int, n_resamples: int = 1000) -> float:
+    if differences.size < 2:
         return 1.0
-    statistic = lambda a, b, axis: np.mean(a, axis=axis) - np.mean(b, axis=axis)
-    result = permutation_test((left, right), statistic, n_resamples=500, alternative="greater")
-    return float(result.pvalue)
+    rng = np.random.default_rng(seed)
+    observed = float(np.mean(differences))
+    null_means = np.empty(n_resamples, dtype=np.float64)
+    for idx in range(n_resamples):
+        signs = rng.choice(np.array([-1.0, 1.0]), size=differences.size, replace=True)
+        null_means[idx] = float(np.mean(differences * signs))
+    return float((np.sum(null_means >= observed) + 1.0) / (n_resamples + 1.0))
 
 
 def _holm(pvalues: list[float]) -> list[float]:

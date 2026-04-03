@@ -31,8 +31,12 @@ def test_run_circuit_interventions_returns_summary(monkeypatch, minimal_config, 
         lambda **kwargs: {"fit": tiny_loader, "val": tiny_loader, "discovery": tiny_loader, "test": tiny_loader},
     )
     trainer = FlowCircuitTrainer(copy.deepcopy(minimal_config))
+    trainer.components.observer.classifier_is_trained = True
     outputs = collect_model_outputs(trainer.components, tiny_loader, device=torch.device("cpu"), max_images=6)
     centroid = outputs["future_descriptors"][0, 0, 0].tolist()
+    # Set representative-node threshold to 0.999 so only image 0 (whose
+    # descriptor is exactly the centroid) is assigned as a member, leaving
+    # the remaining images available as matched non-member controls.
     artifact = {
         "metadata": {"grid_size": 2, "n_layers": outputs["future_descriptors"].shape[1], "n_cells": 4},
         "circuits": [
@@ -41,7 +45,7 @@ def test_run_circuit_interventions_returns_summary(monkeypatch, minimal_config, 
                 "representative_node": [0, 0],
                 "active_nodes": [[0, 0], [1, 0], [2, 0]],
                 "centroids": {"0:0": centroid, "1:0": outputs["future_descriptors"][0, 1, 0].tolist(), "2:0": outputs["future_descriptors"][0, 2, 0].tolist()},
-                "thresholds": {"0:0": -1.0, "1:0": -1.0, "2:0": -1.0},
+                "thresholds": {"0:0": 0.999, "1:0": -1.0, "2:0": -1.0},
             }
         ],
     }

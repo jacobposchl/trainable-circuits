@@ -92,7 +92,7 @@ class FlowTokenizer(nn.Module):
 
         token_tensor = torch.stack(token_inputs, dim=1)
         flow_tensor = torch.stack(flow_targets, dim=1)
-        future_tensor = self._build_future_descriptors(flow_tensor)
+        future_tensor = self.build_future_descriptors(flow_tensor)
 
         return TokenizedBatch(
             token_inputs=token_tensor,
@@ -108,11 +108,19 @@ class FlowTokenizer(nn.Module):
         pooled = pooled.permute(0, 2, 3, 1).contiguous()
         return pooled.view(x.shape[0], self.n_cells, x.shape[1])
 
-    def _build_future_descriptors(self, flow_tensor: torch.Tensor) -> torch.Tensor:
+    def build_future_descriptors(
+        self,
+        flow_tensor: torch.Tensor,
+        *,
+        depth_permutations: list[torch.Tensor] | None = None,
+    ) -> torch.Tensor:
         descriptors: list[torch.Tensor] = []
         batch_size = flow_tensor.shape[0]
         for layer_idx in range(self.n_layers):
             future = flow_tensor[:, layer_idx:, :, :]
+            if depth_permutations is not None:
+                permutation = depth_permutations[layer_idx].to(flow_tensor.device)
+                future = future[:, permutation, :, :]
             future = future.permute(0, 2, 1, 3).contiguous()
             future = future.view(batch_size, self.n_cells, -1)
             q = self.future_projectors[layer_idx](future)

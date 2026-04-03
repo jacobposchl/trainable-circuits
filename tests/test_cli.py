@@ -40,33 +40,66 @@ def test_evaluate_cli_writes_json(monkeypatch, tmp_path):
         def to_dict(self):
             return {"best_baseline": 0.2}
 
-    class DummyTrainer:
-        def __init__(self, config):
-            self.config = config
-
-        def _fit_baselines(self):
-            return object()
-
-        def _evaluate_baselines(self, regressors):
-            return DummyBaseline()
+    class DummyCheck:
+        def to_dict(self):
+            return {"passes": True}
 
     monkeypatch.setattr(
         evaluate_cli,
         "load_components_from_checkpoint",
-        lambda checkpoint, device: type("Loaded", (), {"config": {"data": {"data_dir": "x", "batch_size": 2, "num_workers": 0, "seed": 0, "augment_fit": False, "download": False}, "training": {"validation_images": 2}}})(),
+        lambda checkpoint, device: type(
+            "Loaded",
+            (),
+            {
+                "config": {
+                    "data": {"data_dir": "x", "batch_size": 2, "num_workers": 0, "seed": 0, "augment_fit": False, "download": False},
+                    "training": {"validation_images": 2, "baseline_fit_images": 2},
+                },
+                "tokenizer": type("Tokenizer", (), {"build_future_descriptors": staticmethod(lambda flow_targets, depth_permutations=None: flow_targets)})(),
+                "encoder": type("Encoder", (), {"final_norm": type("FinalNorm", (), {"weight": __import__("torch").zeros(1)})()})(),
+            },
+        )(),
     )
     monkeypatch.setattr(
         evaluate_cli,
         "build_cifar10_splits",
-        lambda **kwargs: {"test": object()},
+        lambda **kwargs: {"fit": object(), "test": object()},
     )
     monkeypatch.setattr(
         evaluate_cli,
         "collect_model_outputs",
-        lambda *args, **kwargs: {"z": None, "flow_targets": None, "future_descriptors": None, "predicted_next": None, "reconstructed_current": None},
+        lambda *args, **kwargs: {
+            "z": __import__("torch").zeros(2, 3, 4, 8),
+            "local_features": [__import__("torch").zeros(2, 4, 5) for _ in range(3)],
+            "flow_targets": __import__("torch").zeros(2, 3, 4, 6),
+            "future_descriptors": __import__("torch").zeros(2, 3, 4, 6),
+            "predicted_next": __import__("torch").zeros(2, 2, 4, 6),
+            "reconstructed_current": __import__("torch").zeros(2, 3, 4, 6),
+        },
+    )
+    monkeypatch.setattr(
+        evaluate_cli,
+        "collect_baseline_features",
+        lambda *args, **kwargs: ([__import__("numpy").zeros((2, 4, 5)) for _ in range(2)], [__import__("numpy").zeros((2, 4, 6)) for _ in range(2)], [__import__("numpy").zeros((2, 4, 6)) for _ in range(2)]),
+    )
+    monkeypatch.setattr(
+        evaluate_cli,
+        "BaselineRegressors",
+        type(
+            "DummyRegressors",
+            (),
+            {
+                "fit": staticmethod(lambda **kwargs: type("Reg", (), {"evaluate": lambda self, **kw: DummyBaseline(), "score_predictions": lambda self, **kw: {"mean_baseline": __import__("numpy").zeros(2), "local_baseline": __import__("numpy").zeros(2), "flow_baseline": __import__("numpy").zeros(2)}})()),
+            },
+        ),
     )
     monkeypatch.setattr(evaluate_cli, "evaluate_representation_metrics", lambda *args, **kwargs: DummyMetrics())
-    monkeypatch.setattr(evaluate_cli, "FlowCircuitTrainer", DummyTrainer)
+    monkeypatch.setattr(evaluate_cli, "compute_prediction_scores_by_image", lambda *args, **kwargs: __import__("numpy").zeros(2))
+    monkeypatch.setattr(evaluate_cli, "compute_alignment_scores", lambda *args, **kwargs: {"model_node_scores": __import__("numpy").zeros(2), "local_node_scores": __import__("numpy").zeros(2), "flow_node_scores": __import__("numpy").zeros(2)})
+    monkeypatch.setattr(evaluate_cli, "evaluate_prediction_check", lambda *args, **kwargs: DummyCheck())
+    monkeypatch.setattr(evaluate_cli, "evaluate_alignment_check", lambda *args, **kwargs: DummyCheck())
+    monkeypatch.setattr(evaluate_cli, "_future_shuffle_prediction_null", lambda *args, **kwargs: {"drop": 0.0})
+    monkeypatch.setattr(evaluate_cli, "_depth_order_alignment_null", lambda *args, **kwargs: {"drop": 0.0})
     monkeypatch.setattr(sys, "argv", ["flow-evaluate", "--checkpoint", str(checkpoint), "--output", str(tmp_path / "eval.json")])
     evaluate_cli.main()
 

@@ -31,6 +31,8 @@ Older code paths were removed from the tracked repo so the public surface matche
 - Backbones: `resnet18`, `resnet34`, `resnet50`
 - Dataset protocol: CIFAR-10 with deterministic `40k fit / 5k val / 5k discovery / 10k test`
 
+Canonical experiment configs now require `backbone.weights_path` to point to a supervised CIFAR-10 checkpoint before training or intervention runs. This prevents the repo from silently using an untrained 10-way classifier head for causal metrics.
+
 ## Install
 
 ```bash
@@ -43,6 +45,7 @@ pip install -e ".[dev]"
 Train a base model:
 
 ```bash
+# First set backbone.weights_path in the config to your trained CIFAR-10 backbone checkpoint.
 flow-train --config configs/flow/resnet18_base.yaml
 ```
 
@@ -72,8 +75,8 @@ The repo now standardizes four artifact types:
 
 - Training checkpoints: versioned `.pt` files containing config, phase metadata, model state, optimizer state, scheduler state, and validation summaries.
 - Evaluation summary: JSON from `flow-evaluate` containing representation metrics and baseline comparison.
-- Candidate-circuit artifact: JSON from `flow-discover` containing discovery metadata, retained node clusters, candidate circuits, centroids, thresholds, and stability stats.
-- Intervention summary: JSON and CSV from `flow-intervene` containing per-circuit member/control effects and corrected significance values.
+- Candidate-circuit artifact: JSON from `flow-discover` containing discovery metadata, retained node clusters, candidate circuits, multi-seed stability summaries, and null-check outputs.
+- Intervention summary: JSON and CSV from `flow-intervene` containing per-circuit member/control effects, confidence intervals, and corrected significance values.
 
 ## Notebook Workflow
 

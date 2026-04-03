@@ -85,3 +85,28 @@ Why:
 
 - prevents Codex and Claude from following diverging project rules
 - keeps tool-specific files thin and referential rather than duplicative
+
+### 8. Canonical Runs Require a Supervised Backbone Checkpoint
+
+Decision:
+
+- canonical CIFAR-10 configs must set `backbone.weights_path`
+- the code fails loudly if a canonical run would otherwise fall back to an untrained classifier head
+
+Why:
+
+- keeps intervention logits scientifically meaningful
+- prevents silent degradation from a pretrained-feature-extractor plus random-head setup
+
+### 9. Confirmatory Outputs Are First-Class Artifacts
+
+Decision:
+
+- evaluation artifacts include same-split confirmatory checks with bootstrap confidence intervals
+- discovery artifacts include multi-seed stability summaries and node-shuffle nulls
+- intervention artifacts include matched-control confidence intervals and all control comparisons used for validation
+
+Why:
+
+- makes the confirmatory story inspectable from saved outputs rather than implicit notebook logic
+- reduces the risk of point-estimate over-interpretation
