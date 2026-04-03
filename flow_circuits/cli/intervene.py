@@ -8,8 +8,19 @@ import time
 
 from flow_circuits.data import build_cifar10_splits
 from flow_circuits.interventions import run_circuit_interventions
-from flow_circuits.training import collect_model_outputs, load_components_from_checkpoint
+from flow_circuits.training import collect_intervention_outputs, load_components_from_checkpoint
 from flow_circuits.utils import seed_everything
+
+
+def _format_seconds(seconds: float) -> str:
+    seconds = int(max(0, round(seconds)))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,9 +39,10 @@ def main() -> None:
     components = load_components_from_checkpoint(args.checkpoint, device=device)
     config = components.config
     seed_everything(config["data"].get("seed", 0))
+    intervention_batch_size = config["interventions"].get("batch_size", config["data"]["batch_size"])
     loaders = build_cifar10_splits(
         data_dir=config["data"]["data_dir"],
-        batch_size=config["data"]["batch_size"],
+        batch_size=intervention_batch_size,
         num_workers=config["data"].get("num_workers", 4),
         seed=config["data"].get("seed", 0),
         augment_fit=config["data"].get("augment_fit", True),
@@ -50,7 +62,7 @@ def main() -> None:
         )
 
     log("Collecting test-set outputs for interventions...")
-    outputs = collect_model_outputs(
+    outputs = collect_intervention_outputs(
         components,
         loaders["test"],
         device=device,
@@ -58,18 +70,40 @@ def main() -> None:
         progress_callback=collect_progress,
     )
     log("Intervention feature collection complete.")
+    n_circuits = len(circuits_artifact.get("circuits", []))
+    log(
+        f"Running interventions on {n_circuits} candidate circuit(s)"
+        f" - ablating active nodes in member vs control images for each circuit..."
+    )
+
+    intervention_t0: list[float | None] = [None]
+
+    def intervention_progress(**event) -> None:
+        if intervention_t0[0] is None:
+            intervention_t0[0] = time.time()
+        completed = event["completed"]
+        total = event["total"]
+        eta_str = ""
+        if completed > 0:
+            elapsed = time.time() - intervention_t0[0]
+            rate = elapsed / completed
+            remaining = rate * (total - completed)
+            eta_str = f"  ETA ~{_format_seconds(remaining)}"
+        print(
+            f"[{time.strftime('%H:%M:%S')}] Interventions:"
+            f" circuit {completed}/{total}"
+            f" (circuit_id={event['circuit_id']}, {event['status']}){eta_str}",
+            flush=True,
+        )
+
     results = run_circuit_interventions(
         components,
         circuits_artifact,
         outputs,
         alpha=config["interventions"].get("alpha", 0.05),
         output_path=args.output or Path(args.circuits).with_name("intervention_summary.json"),
-        progress_callback=lambda **event: print(
-            f"[{time.strftime('%H:%M:%S')}] Interventions:"
-            f" circuit {event['completed']}/{event['total']}"
-            f" (circuit_id={event['circuit_id']}, status={event['status']})",
-            flush=True,
-        ),
+        progress_callback=intervention_progress,
+        n_jobs=max(1, int(config["interventions"].get("n_jobs", 1))),
     )
     csv_path = Path(args.output or Path(args.circuits).with_name("intervention_summary.json")).with_suffix(".csv")
     with csv_path.open("w", encoding="utf-8", newline="") as handle:
@@ -93,9 +127,9 @@ def main() -> None:
                 f"  {r.mean_member_delta_margin:>+12.4f}  {status}",
                 flush=True,
             )
-    print(f"\n  A circuit is validated when ablating its active nodes causes a")
-    print(f"  larger confidence drop for member images than for matched controls,")
-    print(f"  random nodes, and random cells (all Holm-corrected p < alpha).")
+    print("\n  A circuit is validated when ablating its active nodes causes a")
+    print("  larger confidence drop for member images than for matched controls,")
+    print("  random nodes, and random cells (all Holm-corrected p < alpha).")
     print(f"\n  Full results saved to file.\n{bar}\n", flush=True)
 
 

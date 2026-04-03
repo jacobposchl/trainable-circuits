@@ -46,3 +46,25 @@ def test_candidate_discovery_finds_connected_circuit():
     circuit = artifact["circuits"][0]
     assert circuit["active_nodes"]
     assert circuit["thresholds"]
+
+
+def test_prepared_descriptor_clustering_matches_direct_path():
+    rng = np.random.default_rng(0)
+    descriptors = rng.standard_normal((32, 64), dtype=np.float32)
+    descriptors /= np.clip(np.linalg.norm(descriptors, axis=-1, keepdims=True), 1.0e-8, None)
+    discoverer = CandidateCircuitDiscoverer(
+        grid_size=2,
+        min_cluster_fraction=0.2,
+        max_cluster_fraction=0.8,
+        min_cluster_size=2,
+        bootstrap_iterations=1,
+        stability_threshold=0.0,
+        merge_threshold=0.5,
+        node_threshold=0.5,
+        random_seed=0,
+    )
+
+    direct = discoverer._cluster_descriptors(descriptors)
+    prepared = discoverer._cluster_prepared_descriptors(discoverer._prepare_descriptors(descriptors))
+
+    assert np.array_equal(direct, prepared)

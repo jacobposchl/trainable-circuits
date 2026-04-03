@@ -120,17 +120,18 @@ def test_discover_and_intervene_clis_write_outputs(monkeypatch, tmp_path):
         {
             "config": {
                 "data": {"data_dir": "x", "batch_size": 2, "num_workers": 0, "seed": 0, "augment_fit": False, "download": False},
-                "discovery": {"min_cluster_fraction": 0.2, "max_cluster_fraction": 0.8, "min_cluster_size": 2, "bootstrap_iterations": 1, "stability_threshold": 0.0, "merge_threshold": 0.5, "node_threshold": 0.5, "seed": 0},
+                "discovery": {"min_cluster_fraction": 0.2, "max_cluster_fraction": 0.8, "min_cluster_size": 2, "bootstrap_iterations": 1, "stability_threshold": 0.0, "merge_threshold": 0.5, "node_threshold": 0.5, "seed": 0, "batch_size": 5},
                 "tokenization": {"grid_size": 2},
-                "interventions": {"alpha": 0.5},
+                "interventions": {"alpha": 0.5, "batch_size": 7},
             },
         },
     )()
     monkeypatch.setattr(discover_cli, "load_components_from_checkpoint", lambda *args, **kwargs: loaded)
-    monkeypatch.setattr(discover_cli, "build_cifar10_splits", lambda **kwargs: {"discovery": object()})
+    discover_loader_kwargs = {}
+    monkeypatch.setattr(discover_cli, "build_cifar10_splits", lambda **kwargs: discover_loader_kwargs.update(kwargs) or {"discovery": object()})
     monkeypatch.setattr(
         discover_cli,
-        "collect_model_outputs",
+        "collect_discovery_outputs",
         lambda *args, **kwargs: {
             "future_descriptors": __import__("torch").zeros(2, 3, 4, 8),
             "predicted_next": __import__("torch").zeros(2, 2, 4, 6),
@@ -154,12 +155,14 @@ def test_discover_and_intervene_clis_write_outputs(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["flow-discover", "--checkpoint", str(checkpoint), "--output", str(artifact_path)])
     discover_cli.main()
     assert artifact_path.exists()
+    assert discover_loader_kwargs["batch_size"] == 5
 
     monkeypatch.setattr(intervene_cli, "load_components_from_checkpoint", lambda *args, **kwargs: loaded)
-    monkeypatch.setattr(intervene_cli, "build_cifar10_splits", lambda **kwargs: {"test": object()})
+    intervene_loader_kwargs = {}
+    monkeypatch.setattr(intervene_cli, "build_cifar10_splits", lambda **kwargs: intervene_loader_kwargs.update(kwargs) or {"test": object()})
     monkeypatch.setattr(
         intervene_cli,
-        "collect_model_outputs",
+        "collect_intervention_outputs",
         lambda *args, **kwargs: {"images": None, "future_descriptors": None, "indices": None, "labels": None, "logits": None},
     )
     monkeypatch.setattr(
@@ -170,3 +173,72 @@ def test_discover_and_intervene_clis_write_outputs(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "argv", ["flow-intervene", "--checkpoint", str(checkpoint), "--circuits", str(artifact_path), "--output", str(tmp_path / "summary.json")])
     intervene_cli.main()
     assert (tmp_path / "summary.csv").exists()
+    assert intervene_loader_kwargs["batch_size"] == 7
+
+
+def test_discover_cli_parallel_seed_runs_preserve_seed_order(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "checkpoint.pt"
+    checkpoint.write_text("stub", encoding="utf-8")
+    artifact_path = tmp_path / "circuits.json"
+    loaded = type(
+        "Loaded",
+        (),
+        {
+            "config": {
+                "data": {"data_dir": "x", "batch_size": 2, "num_workers": 0, "seed": 0, "augment_fit": False, "download": False},
+                "discovery": {
+                    "min_cluster_fraction": 0.2,
+                    "max_cluster_fraction": 0.8,
+                    "min_cluster_size": 2,
+                    "bootstrap_iterations": 1,
+                    "stability_threshold": 0.0,
+                    "merge_threshold": 0.5,
+                    "node_threshold": 0.5,
+                    "seed": 0,
+                    "seeds": [0, 1, 2],
+                    "n_jobs": 2,
+                    "compute_seed_stability": False,
+                    "compute_node_shuffle_null": False,
+                },
+                "tokenization": {"grid_size": 2},
+            },
+        },
+    )()
+    monkeypatch.setattr(discover_cli, "load_components_from_checkpoint", lambda *args, **kwargs: loaded)
+    monkeypatch.setattr(discover_cli, "build_cifar10_splits", lambda **kwargs: {"discovery": object()})
+    monkeypatch.setattr(
+        discover_cli,
+        "collect_discovery_outputs",
+        lambda *args, **kwargs: {
+            "future_descriptors": __import__("torch").zeros(2, 3, 4, 8),
+            "predicted_next": __import__("torch").zeros(2, 2, 4, 6),
+            "flow_targets": __import__("torch").zeros(2, 3, 4, 6),
+            "indices": __import__("torch").arange(2),
+            "labels": __import__("torch").tensor([0, 1]),
+        },
+    )
+
+    class DummyDiscoverer:
+        def __init__(self, **kwargs):
+            self.random_seed = kwargs["random_seed"]
+
+        def discover(self, **kwargs):
+            import time
+            time.sleep(0.01 * (2 - self.random_seed))
+            return {
+                "metadata": {"grid_size": 2, "n_layers": 3, "n_cells": 4},
+                "node_clusters": [{"seed": self.random_seed}],
+                "circuits": [{"id": self.random_seed, "active_nodes": [], "image_set": [], "representative_node": [0, 0], "centroids": {"0:0": [1.0]}, "thresholds": {"0:0": 0.0}}],
+            }
+
+        def save(self, artifact, path):
+            Path(path).write_text(json.dumps(artifact), encoding="utf-8")
+
+    monkeypatch.setattr(discover_cli, "CandidateCircuitDiscoverer", DummyDiscoverer)
+    monkeypatch.setattr(sys, "argv", ["flow-discover", "--checkpoint", str(checkpoint), "--output", str(artifact_path)])
+    discover_cli.main()
+    artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+
+    assert [run["seed"] for run in artifact["seed_runs"]] == [0, 1, 2]
+    assert artifact["stability_summary"]["skipped"] is True
+    assert artifact["null_checks"]["node_shuffle"]["skipped"] is True

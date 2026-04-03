@@ -50,7 +50,13 @@ These fields are the most common to change during development:
 - `training.alignment_max_pairs`
 - `discovery.max_images`
 - `discovery.bootstrap_iterations`
+- `discovery.batch_size`
+- `discovery.n_jobs`
+- `discovery.compute_seed_stability`
+- `discovery.compute_node_shuffle_null`
 - `interventions.max_images`
+- `interventions.batch_size`
+- `interventions.n_jobs`
 - `logging.checkpoint_dir`
 
 ## Guidance

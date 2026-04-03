@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 import itertools
+import math
 from pathlib import Path
 
 import numpy as np
@@ -184,6 +185,92 @@ def collect_model_outputs(
     return outputs
 
 
+def collect_discovery_outputs(
+    components: LoadedFlowComponents,
+    loader,
+    *,
+    device: torch.device,
+    max_images: int | None = None,
+    progress_callback=None,
+) -> dict[str, torch.Tensor]:
+    outputs = {
+        "flow_targets": [],
+        "future_descriptors": [],
+        "predicted_next": [],
+        "labels": [],
+        "indices": [],
+    }
+    seen = 0
+    total_batches = _infer_total_batches(loader, components, max_images=max_images)
+    with torch.no_grad():
+        for batch_idx, (images, labels, indices) in enumerate(loader, start=1):
+            device_images = images.to(device)
+            observations = components.observer(device_images)
+            tokenized = components.tokenizer(observations)
+            z, _ = components.encoder(tokenized.token_inputs)
+            predicted_next = _predict_next_from_latents(
+                components.objective,
+                z,
+                tokenized.flow_targets,
+            )
+            outputs["flow_targets"].append(tokenized.flow_targets.cpu())
+            outputs["future_descriptors"].append(tokenized.future_descriptors.cpu())
+            outputs["predicted_next"].append(predicted_next.cpu())
+            outputs["labels"].append(labels.cpu())
+            outputs["indices"].append(indices.cpu())
+            seen += device_images.shape[0]
+            _maybe_report_progress(
+                progress_callback,
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                seen_images=seen,
+                target_images=max_images,
+            )
+            if max_images is not None and seen >= max_images:
+                break
+    return _concatenate_output_tensors(outputs, max_images=max_images)
+
+
+def collect_intervention_outputs(
+    components: LoadedFlowComponents,
+    loader,
+    *,
+    device: torch.device,
+    max_images: int | None = None,
+    progress_callback=None,
+) -> dict[str, torch.Tensor]:
+    outputs = {
+        "future_descriptors": [],
+        "images": [],
+        "logits": [],
+        "labels": [],
+        "indices": [],
+    }
+    seen = 0
+    total_batches = _infer_total_batches(loader, components, max_images=max_images)
+    with torch.no_grad():
+        for batch_idx, (images, labels, indices) in enumerate(loader, start=1):
+            device_images = images.to(device)
+            observations = components.observer(device_images)
+            tokenized = components.tokenizer(observations)
+            outputs["future_descriptors"].append(tokenized.future_descriptors.cpu())
+            outputs["images"].append(images.cpu())
+            outputs["logits"].append(components.observer.model(device_images).cpu())
+            outputs["labels"].append(labels.cpu())
+            outputs["indices"].append(indices.cpu())
+            seen += device_images.shape[0]
+            _maybe_report_progress(
+                progress_callback,
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                seen_images=seen,
+                target_images=max_images,
+            )
+            if max_images is not None and seen >= max_images:
+                break
+    return _concatenate_output_tensors(outputs, max_images=max_images)
+
+
 def collect_baseline_features(
     components: LoadedFlowComponents,
     loader,
@@ -216,6 +303,31 @@ def collect_baseline_features(
         [np.concatenate(values, axis=0) for values in flows_by_layer or []],
         [np.concatenate(values, axis=0) for values in next_by_layer or []],
     )
+
+
+def _infer_total_batches(loader, components: LoadedFlowComponents, *, max_images: int | None) -> int | None:
+    batch_size = getattr(loader, "batch_size", None) or components.config["data"].get("batch_size")
+    if not hasattr(loader, "__len__"):
+        return None
+    total_batches = len(loader)
+    if max_images is not None and batch_size:
+        total_batches = min(total_batches, int(math.ceil(max_images / batch_size)))
+    return total_batches
+
+
+def _maybe_report_progress(progress_callback, **kwargs) -> None:
+    if progress_callback is not None:
+        progress_callback(**kwargs)
+
+
+def _concatenate_output_tensors(outputs: dict, *, max_images: int | None) -> dict:
+    for key, value in outputs.items():
+        if not value:
+            continue
+        outputs[key] = torch.cat(value, dim=0)
+        if max_images is not None:
+            outputs[key] = outputs[key][:max_images]
+    return outputs
 
 
 class FlowCircuitTrainer:
@@ -771,3 +883,25 @@ def _forward_pass(
         traj_tau=traj_tau,
     )
     return tokenized, z, output
+
+
+def _predict_next_from_latents(
+    objective: FlowObjective,
+    z: torch.Tensor,
+    flow_targets: torch.Tensor,
+) -> torch.Tensor:
+    batch_size, n_layers, n_cells, token_dim = z.shape
+    flow_dim = flow_targets.shape[-1]
+    predicted_next = torch.zeros(
+        batch_size,
+        n_layers - 1,
+        n_cells,
+        flow_dim,
+        device=z.device,
+        dtype=z.dtype,
+    )
+    for layer_idx in range(n_layers - 1):
+        z_layer = z[:, layer_idx].reshape(batch_size * n_cells, token_dim)
+        pred = objective.prediction_decoders[layer_idx](z_layer).view(batch_size, n_cells, flow_dim)
+        predicted_next[:, layer_idx] = pred
+    return predicted_next

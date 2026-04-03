@@ -177,6 +177,19 @@ def test_nb02_and_nb03_compare_phase_b_and_phase_c_outputs():
         assert "for tag, label in MODEL_ORDER:" in run_cell_source
 
 
+def test_nb02_and_nb03_use_cli_progress_not_notebook_heartbeats():
+    for notebook_name in (
+        "nb02_candidate_circuit_discovery_and_stability.ipynb",
+        "nb03_interventions_and_qualitative_analysis.ipynb",
+    ):
+        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
+        config_cell_source = "".join(data["cells"][5]["source"])
+
+        assert "still running... elapsed" not in config_cell_source
+        assert "import queue" not in config_cell_source
+        assert "import threading" not in config_cell_source
+
+
 def test_repo_text_has_no_legacy_runtime_references():
     offenders: list[str] = []
     for path in _iter_repo_text_files():

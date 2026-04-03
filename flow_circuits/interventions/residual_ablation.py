@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
@@ -80,34 +81,31 @@ def assign_circuit_members(
     dataset_indices: torch.Tensor,
 ) -> torch.Tensor:
     active_nodes = [tuple(node) for node in circuit["active_nodes"]]
+    if not active_nodes:
+        return torch.zeros(future_descriptors.shape[0], dtype=torch.bool)
     representative_node = tuple(circuit["representative_node"])
-    centroids = {
-        tuple(int(value) for value in key.split(":")): torch.tensor(vec, dtype=future_descriptors.dtype)
-        for key, vec in circuit["centroids"].items()
-    }
-    thresholds = {
-        tuple(int(value) for value in key.split(":")): float(value)
-        for key, value in circuit["thresholds"].items()
-    }
-    row_mask = torch.zeros(future_descriptors.shape[0], dtype=torch.bool)
-
-    for row_idx in range(future_descriptors.shape[0]):
-        rep_centroid = centroids[representative_node].to(future_descriptors.device)
-        rep_score = torch.dot(
-            future_descriptors[row_idx, representative_node[0], representative_node[1]],
-            rep_centroid,
-        ).item()
-        if rep_score < thresholds[representative_node]:
-            continue
-        satisfied = 0
-        for node in active_nodes:
-            centroid = centroids[node].to(future_descriptors.device)
-            score = torch.dot(future_descriptors[row_idx, node[0], node[1]], centroid).item()
-            if score >= thresholds[node]:
-                satisfied += 1
-        if satisfied >= max(1, int(np.ceil(0.5 * len(active_nodes)))):
-            row_mask[row_idx] = True
-    return row_mask
+    device = future_descriptors.device
+    dtype = future_descriptors.dtype
+    layer_indices = torch.tensor([node[0] for node in active_nodes], dtype=torch.long, device=device)
+    cell_indices = torch.tensor([node[1] for node in active_nodes], dtype=torch.long, device=device)
+    centroid_matrix = torch.stack(
+        [
+            torch.tensor(circuit["centroids"][f"{layer_idx}:{cell_idx}"], dtype=dtype, device=device)
+            for layer_idx, cell_idx in active_nodes
+        ],
+        dim=0,
+    )
+    threshold_vector = torch.tensor(
+        [float(circuit["thresholds"][f"{layer_idx}:{cell_idx}"]) for layer_idx, cell_idx in active_nodes],
+        dtype=dtype,
+        device=device,
+    )
+    representative_position = active_nodes.index(representative_node)
+    node_descriptors = future_descriptors[:, layer_indices, cell_indices, :]
+    scores = (node_descriptors * centroid_matrix.unsqueeze(0)).sum(dim=-1)
+    representative_ok = scores[:, representative_position] >= threshold_vector[representative_position]
+    satisfied = (scores >= threshold_vector.unsqueeze(0)).sum(dim=1)
+    return representative_ok & (satisfied >= max(1, int(np.ceil(0.5 * len(active_nodes)))))
 
 
 def run_circuit_interventions(
@@ -118,6 +116,7 @@ def run_circuit_interventions(
     alpha: float = 0.05,
     output_path: str | Path | None = None,
     progress_callback=None,
+    n_jobs: int = 1,
 ) -> list[InterventionResult]:
     components.observer.require_semantic_logits()
     future_descriptors = test_outputs["future_descriptors"]
@@ -192,12 +191,6 @@ def run_circuit_interventions(
         member_vs_nonmember = (member_delta_margin[:control_delta_margin.shape[0]] - control_delta_margin).numpy()
         member_vs_random = (member_delta_margin - random_delta_margin).numpy()
         member_vs_random_cell = (member_delta_margin - random_cell_delta_margin).numpy()
-        p_nonmember = _paired_permutation_pvalue(member_vs_nonmember, seed=int(circuit["id"]) + 101)
-        p_random = _paired_permutation_pvalue(member_vs_random, seed=int(circuit["id"]) + 151)
-        p_random_cell = _paired_permutation_pvalue(member_vs_random_cell, seed=int(circuit["id"]) + 181)
-        ci_nonmember = bootstrap_mean_ci(member_vs_nonmember, n_bootstrap=500, seed=int(circuit["id"]) + 201)
-        ci_random = bootstrap_mean_ci(member_vs_random, n_bootstrap=500, seed=int(circuit["id"]) + 251)
-        ci_random_cell = bootstrap_mean_ci(member_vs_random_cell, n_bootstrap=500, seed=int(circuit["id"]) + 281)
         raw_results.append(
             {
                 "circuit_id": int(circuit["id"]),
@@ -209,12 +202,9 @@ def run_circuit_interventions(
                 "mean_nonmember_delta_true": float(control_delta_true.mean().item()),
                 "mean_random_node_delta_margin": float(random_delta_margin.mean().item()),
                 "mean_random_cell_delta_margin": float(random_cell_delta_margin.mean().item()),
-                "p_member_vs_nonmember": float(p_nonmember),
-                "p_member_vs_random_node": float(p_random),
-                "p_member_vs_random_cell": float(p_random_cell),
-                "ci_member_vs_nonmember": [float(ci_nonmember[0]), float(ci_nonmember[1])],
-                "ci_member_vs_random_node": [float(ci_random[0]), float(ci_random[1])],
-                "ci_member_vs_random_cell": [float(ci_random_cell[0]), float(ci_random_cell[1])],
+                "member_vs_nonmember": member_vs_nonmember,
+                "member_vs_random_node": member_vs_random,
+                "member_vs_random_cell": member_vs_random_cell,
             }
         )
         if progress_callback is not None:
@@ -225,11 +215,12 @@ def run_circuit_interventions(
                 status="completed",
             )
 
-    corrected_nonmember = _holm([item["p_member_vs_nonmember"] for item in raw_results])
-    corrected_random = _holm([item["p_member_vs_random_node"] for item in raw_results])
-    corrected_random_cell = _holm([item["p_member_vs_random_cell"] for item in raw_results])
+    summarized = _summarize_intervention_statistics(raw_results, n_jobs=max(1, int(n_jobs)))
+    corrected_nonmember = _holm([item["p_member_vs_nonmember"] for item in summarized])
+    corrected_random = _holm([item["p_member_vs_random_node"] for item in summarized])
+    corrected_random_cell = _holm([item["p_member_vs_random_cell"] for item in summarized])
     results = []
-    for idx, item in enumerate(raw_results):
+    for idx, item in enumerate(summarized):
         validated = (
             corrected_nonmember[idx] < alpha
             and corrected_random[idx] < alpha
@@ -267,6 +258,38 @@ def run_circuit_interventions(
         with path.open("w", encoding="utf-8") as handle:
             json.dump([result.to_dict() for result in results], handle, indent=2)
     return results
+
+
+def _summarize_intervention_statistics(raw_results: list[dict], *, n_jobs: int) -> list[dict]:
+    if n_jobs <= 1 or len(raw_results) <= 1:
+        return [_compute_statistical_summary(item) for item in raw_results]
+    with ThreadPoolExecutor(max_workers=min(n_jobs, len(raw_results))) as executor:
+        return list(executor.map(_compute_statistical_summary, raw_results))
+
+
+def _compute_statistical_summary(item: dict) -> dict:
+    circuit_id = int(item["circuit_id"])
+    member_vs_nonmember = item["member_vs_nonmember"]
+    member_vs_random = item["member_vs_random_node"]
+    member_vs_random_cell = item["member_vs_random_cell"]
+    summary = {
+        key: value
+        for key, value in item.items()
+        if key not in {"member_vs_nonmember", "member_vs_random_node", "member_vs_random_cell"}
+    }
+    p_nonmember = _paired_permutation_pvalue(member_vs_nonmember, seed=circuit_id + 101)
+    p_random = _paired_permutation_pvalue(member_vs_random, seed=circuit_id + 151)
+    p_random_cell = _paired_permutation_pvalue(member_vs_random_cell, seed=circuit_id + 181)
+    ci_nonmember = bootstrap_mean_ci(member_vs_nonmember, n_bootstrap=500, seed=circuit_id + 201)
+    ci_random = bootstrap_mean_ci(member_vs_random, n_bootstrap=500, seed=circuit_id + 251)
+    ci_random_cell = bootstrap_mean_ci(member_vs_random_cell, n_bootstrap=500, seed=circuit_id + 281)
+    summary["p_member_vs_nonmember"] = float(p_nonmember)
+    summary["p_member_vs_random_node"] = float(p_random)
+    summary["p_member_vs_random_cell"] = float(p_random_cell)
+    summary["ci_member_vs_nonmember"] = [float(ci_nonmember[0]), float(ci_nonmember[1])]
+    summary["ci_member_vs_random_node"] = [float(ci_random[0]), float(ci_random[1])]
+    summary["ci_member_vs_random_cell"] = [float(ci_random_cell[0]), float(ci_random_cell[1])]
+    return summary
 
 
 def _margin(logits: torch.Tensor) -> torch.Tensor:

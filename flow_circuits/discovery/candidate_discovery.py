@@ -6,6 +6,7 @@ from pathlib import Path
 
 import hdbscan
 import numpy as np
+from sklearn.decomposition import PCA
 
 from flow_circuits.evaluation import bootstrap_mean_ci
 
@@ -99,14 +100,15 @@ class CandidateCircuitDiscoverer:
         for layer_idx in range(n_layers):
             for cell_idx in range(n_cells):
                 descriptors = future_descriptors[:, layer_idx, cell_idx, :]
-                labels = self._cluster_descriptors(descriptors)
+                prepared_descriptors = self._prepare_descriptors(descriptors)
+                labels = self._cluster_prepared_descriptors(prepared_descriptors)
                 for cluster_id in sorted(set(labels.tolist())):
                     if cluster_id == -1:
                         continue
                     members = np.flatnonzero(labels == cluster_id)
                     if not (n_min <= members.size <= n_max):
                         continue
-                    stability = self._bootstrap_stability(descriptors, members)
+                    stability = self._bootstrap_stability(prepared_descriptors, members)
                     if stability < self.stability_threshold:
                         continue
                     node_clusters.append(
@@ -130,7 +132,20 @@ class CandidateCircuitDiscoverer:
                     )
         return node_clusters
 
-    def _cluster_descriptors(self, descriptors: np.ndarray) -> np.ndarray:
+    def _prepare_descriptors(self, descriptors: np.ndarray) -> np.ndarray:
+        # HDBSCAN is O(n^2) in high dimensions. PCA-reduce to 32 dims first so
+        # tree-based distance algorithms work. The future descriptors are L2-normalized
+        # so PCA followed by re-normalization preserves angular cluster structure.
+        effective = descriptors
+        n_samples, n_dims = descriptors.shape
+        if n_dims > 32 and n_samples > 100:
+            n_components = min(32, n_samples - 1, n_dims)
+            reduced = PCA(n_components=n_components, random_state=self.random_seed).fit_transform(descriptors)
+            norms = np.linalg.norm(reduced, axis=1, keepdims=True)
+            effective = reduced / np.clip(norms, 1e-8, None)
+        return effective
+
+    def _cluster_prepared_descriptors(self, descriptors: np.ndarray) -> np.ndarray:
         clusterer = hdbscan.HDBSCAN(
             min_cluster_size=max(self.min_cluster_size, 2),
             min_samples=None,
@@ -138,12 +153,15 @@ class CandidateCircuitDiscoverer:
         )
         return clusterer.fit_predict(descriptors)
 
+    def _cluster_descriptors(self, descriptors: np.ndarray) -> np.ndarray:
+        return self._cluster_prepared_descriptors(self._prepare_descriptors(descriptors))
+
     def _bootstrap_stability(self, descriptors: np.ndarray, members: np.ndarray) -> float:
         base_members = set(members.tolist())
         scores = []
         for _ in range(self.bootstrap_iterations):
             bootstrap_rows = self.rng.integers(0, descriptors.shape[0], size=descriptors.shape[0])
-            bootstrap_labels = self._cluster_descriptors(descriptors[bootstrap_rows])
+            bootstrap_labels = self._cluster_prepared_descriptors(descriptors[bootstrap_rows])
             best = 0.0
             for cluster_id in set(bootstrap_labels.tolist()):
                 if cluster_id == -1:

@@ -166,6 +166,11 @@ Each `seed_runs` item currently includes:
 - `reference_seed`
 - `per_circuit`
 
+When cross-seed stability is disabled by config, `stability_summary` still exists and additionally includes:
+
+- `skipped`
+- `reason`
+
 Each `stability_summary.per_circuit` item currently includes:
 
 - `circuit_id`
@@ -181,6 +186,11 @@ Each `stability_summary.per_circuit` item currently includes:
 `null_checks` currently includes:
 
 - `node_shuffle`
+
+When the node-shuffle null is disabled by config, `null_checks.node_shuffle` still exists and additionally includes:
+
+- `skipped`
+- `reason`
 
 Contract notes:
 
