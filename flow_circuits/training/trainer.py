@@ -115,6 +115,7 @@ def collect_model_outputs(
     *,
     device: torch.device,
     max_images: int | None = None,
+    progress_callback=None,
 ) -> dict[str, torch.Tensor]:
     outputs = {
         "z": [],
@@ -129,8 +130,14 @@ def collect_model_outputs(
         "indices": [],
     }
     seen = 0
+    batch_size = getattr(loader, "batch_size", None) or components.config["data"].get("batch_size")
+    total_batches = None
+    if hasattr(loader, "__len__"):
+        total_batches = len(loader)
+        if max_images is not None and batch_size:
+            total_batches = min(total_batches, int(np.ceil(max_images / batch_size)))
     with torch.no_grad():
-        for images, labels, indices in loader:
+        for batch_idx, (images, labels, indices) in enumerate(loader, start=1):
             device_images = images.to(device)
             tokenized, z, objective_output = _forward_pass(components, device_images, lambda_rec=1.0, lambda_traj=0.0)
             outputs["z"].append(z.cpu())
@@ -148,6 +155,13 @@ def collect_model_outputs(
             outputs["labels"].append(labels.cpu())
             outputs["indices"].append(indices.cpu())
             seen += device_images.shape[0]
+            if progress_callback is not None:
+                progress_callback(
+                    batch_idx=batch_idx,
+                    total_batches=total_batches,
+                    seen_images=seen,
+                    target_images=max_images,
+                )
             if max_images is not None and seen >= max_images:
                 break
 

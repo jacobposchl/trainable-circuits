@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import time
 
 from flow_circuits.data import build_cifar10_splits
 from flow_circuits.discovery import (
@@ -37,12 +38,27 @@ def main() -> None:
         augment_fit=config["data"].get("augment_fit", True),
         download=config["data"].get("download", True),
     )
+
+    def log(message: str) -> None:
+        print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+    def collect_progress(*, batch_idx: int, total_batches: int | None, seen_images: int, target_images: int | None) -> None:
+        target = target_images if target_images is not None else "all"
+        total = total_batches if total_batches is not None else "?"
+        print(
+            f"[{time.strftime('%H:%M:%S')}] Discovery data pass: batch {batch_idx}/{total}  images {seen_images}/{target}",
+            flush=True,
+        )
+
+    log("Loading discovery features from checkpoint outputs...")
     outputs = collect_model_outputs(
         components,
         loaders["discovery"],
         device=device,
         max_images=config["discovery"].get("max_images"),
+        progress_callback=collect_progress,
     )
+    log("Discovery feature collection complete.")
 
     discoverer_kwargs = {
         "grid_size": config["tokenization"].get("grid_size", 4),
@@ -57,14 +73,37 @@ def main() -> None:
     discovery_seeds = config["discovery"].get("seeds") or [config["discovery"].get("seed", 0)]
 
     seed_runs = []
-    for discovery_seed in discovery_seeds:
+    for seed_idx, discovery_seed in enumerate(discovery_seeds, start=1):
+        log(f"Discovery seed {seed_idx}/{len(discovery_seeds)} (seed={discovery_seed})")
         discoverer = CandidateCircuitDiscoverer(**discoverer_kwargs, random_seed=discovery_seed)
+
+        def discovery_progress(**event) -> None:
+            stage = event.get("stage")
+            if stage == "node_clustering":
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] Discovery seed {seed_idx}/{len(discovery_seeds)}:"
+                    f" node {event['completed']}/{event['total']}"
+                    f" (layer {event['layer_idx']}, cell {event['cell_idx']})"
+                    f"  node-clusters={event['n_node_clusters']}",
+                    flush=True,
+                )
+            elif stage == "node_clustering_done":
+                log(
+                    f"Discovery seed {seed_idx}/{len(discovery_seeds)}:"
+                    f" node clustering complete with {event['n_node_clusters']} node clusters"
+                )
+
         artifact = discoverer.discover(
             future_descriptors=outputs["future_descriptors"].numpy(),
             predicted_next=outputs["predicted_next"].numpy(),
             flow_targets=outputs["flow_targets"].numpy(),
             dataset_indices=outputs["indices"].numpy(),
             labels=outputs["labels"].numpy(),
+            progress_callback=discovery_progress,
+        )
+        log(
+            f"Discovery seed {seed_idx}/{len(discovery_seeds)} complete:"
+            f" {len(artifact.get('circuits', []))} candidate circuits"
         )
         seed_runs.append(
             {
@@ -91,6 +130,12 @@ def main() -> None:
             seed_runs,
             bootstrap_iterations=config["discovery"].get("stability_bootstrap_iterations", 500),
             seed=config["discovery"].get("seed", 0),
+            progress_callback=lambda **event: print(
+                f"[{time.strftime('%H:%M:%S')}] Seed stability:"
+                f" circuit {event['completed']}/{event['total']}"
+                f" (circuit_id={event['circuit_id']})",
+                flush=True,
+            ),
         ),
         "null_checks": {
             "node_shuffle": run_node_shuffle_null(
@@ -104,6 +149,7 @@ def main() -> None:
             ),
         },
     }
+    log("Node-shuffle null complete.")
     if args.output:
         output_path = Path(args.output)
     else:

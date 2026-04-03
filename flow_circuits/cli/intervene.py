@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 from pathlib import Path
+import time
 
 from flow_circuits.data import build_cifar10_splits
 from flow_circuits.interventions import run_circuit_interventions
@@ -36,18 +37,39 @@ def main() -> None:
         download=config["data"].get("download", True),
     )
     circuits_artifact = json.loads(Path(args.circuits).read_text(encoding="utf-8"))
+
+    def log(message: str) -> None:
+        print(f"[{time.strftime('%H:%M:%S')}] {message}", flush=True)
+
+    def collect_progress(*, batch_idx: int, total_batches: int | None, seen_images: int, target_images: int | None) -> None:
+        target = target_images if target_images is not None else "all"
+        total = total_batches if total_batches is not None else "?"
+        print(
+            f"[{time.strftime('%H:%M:%S')}] Intervention data pass: batch {batch_idx}/{total}  images {seen_images}/{target}",
+            flush=True,
+        )
+
+    log("Collecting test-set outputs for interventions...")
     outputs = collect_model_outputs(
         components,
         loaders["test"],
         device=device,
         max_images=config["interventions"].get("max_images"),
+        progress_callback=collect_progress,
     )
+    log("Intervention feature collection complete.")
     results = run_circuit_interventions(
         components,
         circuits_artifact,
         outputs,
         alpha=config["interventions"].get("alpha", 0.05),
         output_path=args.output or Path(args.circuits).with_name("intervention_summary.json"),
+        progress_callback=lambda **event: print(
+            f"[{time.strftime('%H:%M:%S')}] Interventions:"
+            f" circuit {event['completed']}/{event['total']}"
+            f" (circuit_id={event['circuit_id']}, status={event['status']})",
+            flush=True,
+        ),
     )
     csv_path = Path(args.output or Path(args.circuits).with_name("intervention_summary.json")).with_suffix(".csv")
     with csv_path.open("w", encoding="utf-8", newline="") as handle:

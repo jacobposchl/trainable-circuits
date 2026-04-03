@@ -117,6 +117,7 @@ def run_circuit_interventions(
     *,
     alpha: float = 0.05,
     output_path: str | Path | None = None,
+    progress_callback=None,
 ) -> list[InterventionResult]:
     components.observer.require_semantic_logits()
     future_descriptors = test_outputs["future_descriptors"]
@@ -128,10 +129,18 @@ def run_circuit_interventions(
     ablator = ResidualPatchAblator(components, grid_size=circuits_artifact["metadata"]["grid_size"])
 
     raw_results = []
-    for circuit in circuits_artifact["circuits"]:
+    total_circuits = len(circuits_artifact["circuits"])
+    for circuit_idx, circuit in enumerate(circuits_artifact["circuits"], start=1):
         member_mask = assign_circuit_members(circuit, future_descriptors, dataset_indices)
         member_rows = torch.nonzero(member_mask, as_tuple=False).flatten()
         if member_rows.numel() == 0:
+            if progress_callback is not None:
+                progress_callback(
+                    completed=circuit_idx,
+                    total=total_circuits,
+                    circuit_id=int(circuit["id"]),
+                    status="skipped_no_members",
+                )
             continue
 
         member_images = test_outputs["images"][member_rows].to(components.encoder.final_norm.weight.device)
@@ -149,6 +158,13 @@ def run_circuit_interventions(
             margins=margins,
         )
         if control_rows.numel() == 0:
+            if progress_callback is not None:
+                progress_callback(
+                    completed=circuit_idx,
+                    total=total_circuits,
+                    circuit_id=int(circuit["id"]),
+                    status="skipped_no_controls",
+                )
             continue
         control_images = test_outputs["images"][control_rows].to(member_images.device)
         control_labels = labels[control_rows]
@@ -201,6 +217,13 @@ def run_circuit_interventions(
                 "ci_member_vs_random_cell": [float(ci_random_cell[0]), float(ci_random_cell[1])],
             }
         )
+        if progress_callback is not None:
+            progress_callback(
+                completed=circuit_idx,
+                total=total_circuits,
+                circuit_id=int(circuit["id"]),
+                status="completed",
+            )
 
     corrected_nonmember = _holm([item["p_member_vs_nonmember"] for item in raw_results])
     corrected_random = _holm([item["p_member_vs_random_node"] for item in raw_results])

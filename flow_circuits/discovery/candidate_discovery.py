@@ -43,9 +43,19 @@ class CandidateCircuitDiscoverer:
         flow_targets: np.ndarray,
         dataset_indices: np.ndarray,
         labels: np.ndarray | None = None,
+        progress_callback=None,
     ) -> dict:
         n_images, n_layers, n_cells, _ = future_descriptors.shape
-        node_clusters = self._discover_node_clusters(future_descriptors, dataset_indices)
+        if progress_callback is not None:
+            progress_callback(stage="node_clustering_start", completed=0, total=int(n_layers * n_cells))
+        node_clusters = self._discover_node_clusters(future_descriptors, dataset_indices, progress_callback=progress_callback)
+        if progress_callback is not None:
+            progress_callback(
+                stage="node_clustering_done",
+                completed=int(n_layers * n_cells),
+                total=int(n_layers * n_cells),
+                n_node_clusters=len(node_clusters),
+            )
         circuits = self._merge_node_clusters(
             node_clusters=node_clusters,
             future_descriptors=future_descriptors,
@@ -73,11 +83,19 @@ class CandidateCircuitDiscoverer:
         with path.open("w", encoding="utf-8") as handle:
             json.dump(artifact, handle, indent=2)
 
-    def _discover_node_clusters(self, future_descriptors: np.ndarray, dataset_indices: np.ndarray) -> list[dict]:
+    def _discover_node_clusters(
+        self,
+        future_descriptors: np.ndarray,
+        dataset_indices: np.ndarray,
+        *,
+        progress_callback=None,
+    ) -> list[dict]:
         n_images, n_layers, n_cells, _ = future_descriptors.shape
         node_clusters = []
         n_min = max(self.min_cluster_size, int(np.ceil(self.min_cluster_fraction * n_images)))
         n_max = int(np.floor(self.max_cluster_fraction * n_images))
+        total_nodes = n_layers * n_cells
+        completed_nodes = 0
         for layer_idx in range(n_layers):
             for cell_idx in range(n_cells):
                 descriptors = future_descriptors[:, layer_idx, cell_idx, :]
@@ -99,6 +117,16 @@ class CandidateCircuitDiscoverer:
                             "size": int(members.size),
                             "stability": float(stability),
                         }
+                    )
+                completed_nodes += 1
+                if progress_callback is not None:
+                    progress_callback(
+                        stage="node_clustering",
+                        completed=completed_nodes,
+                        total=total_nodes,
+                        layer_idx=int(layer_idx),
+                        cell_idx=int(cell_idx),
+                        n_node_clusters=len(node_clusters),
                     )
         return node_clusters
 
@@ -313,6 +341,7 @@ def summarize_seed_stability(
     *,
     bootstrap_iterations: int = 500,
     seed: int = 0,
+    progress_callback=None,
 ) -> dict:
     if not seed_runs:
         return {"n_seed_runs": 0, "per_circuit": []}
@@ -321,7 +350,8 @@ def summarize_seed_stability(
     comparison_runs = seed_runs[1:]
     rng = np.random.default_rng(seed)
     per_circuit = []
-    for circuit in reference["circuits"]:
+    total_circuits = len(reference["circuits"])
+    for circuit_idx, circuit in enumerate(reference["circuits"], start=1):
         observed_image_jaccards = []
         observed_active_f1 = []
         null_image_jaccards = []
@@ -362,6 +392,13 @@ def summarize_seed_stability(
                 "stable": bool(image_ci[0] > 0.0 and active_ci[0] > 0.0),
             }
         )
+        if progress_callback is not None:
+            progress_callback(
+                stage="seed_stability",
+                completed=circuit_idx,
+                total=total_circuits,
+                circuit_id=int(circuit["id"]),
+            )
     return {
         "n_seed_runs": int(len(seed_runs)),
         "reference_seed": int(reference["seed"]),
