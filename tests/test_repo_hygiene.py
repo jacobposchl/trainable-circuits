@@ -118,35 +118,63 @@ def test_nb02_and_nb03_phase_c_schedule_matches_nb01_behavior():
         mode_cell_source = "".join(data["cells"][5]["source"])
 
         assert "import sys" in mode_cell_source
-        assert "'phase_c': 1" in mode_cell_source
-        assert "'phase_c': 5" in mode_cell_source
-        assert "effective_phase_epochs['phase_c'] = 0" in mode_cell_source
+        assert "phase_b.pt" in mode_cell_source
+        assert "phase_c.pt" in mode_cell_source
+        assert "flow-train" not in mode_cell_source
 
 
 def test_notebooks_auto_resume_from_phase_b_checkpoint():
-    for notebook_name, cell_index in (
-        ("nb01_training_and_representation_metrics.ipynb", 7),
-        ("nb02_candidate_circuit_discovery_and_stability.ipynb", 7),
-        ("nb03_interventions_and_qualitative_analysis.ipynb", 7),
+    data = json.loads((NOTEBOOK_DIR / "nb01_training_and_representation_metrics.ipynb").read_text(encoding="utf-8"))
+    run_cell_source = "".join(data["cells"][7]["source"])
+
+    assert "RESUME_CHECKPOINT = PHASE_B_CHECKPOINT" in run_cell_source
+    assert "'--resume', str(RESUME_CHECKPOINT)" in run_cell_source
+
+
+def test_nb02_and_nb03_never_retrain_flow_model():
+    for notebook_name in (
+        "nb02_candidate_circuit_discovery_and_stability.ipynb",
+        "nb03_interventions_and_qualitative_analysis.ipynb",
     ):
         data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
-        run_cell_source = "".join(data["cells"][cell_index]["source"])
+        mode_cell_source = "".join(data["cells"][5]["source"])
+        run_cell_source = "".join(data["cells"][7]["source"])
 
-        assert "RESUME_CHECKPOINT = PHASE_B_CHECKPOINT" in run_cell_source
-        assert "'--resume', str(RESUME_CHECKPOINT)" in run_cell_source
+        assert "flow-train" not in mode_cell_source
+        assert "flow-train" not in run_cell_source
+        assert "requires pre-trained phase_b.pt and phase_c.pt checkpoints" in run_cell_source
 
 
-def test_notebooks_expose_phase_c_checkpoint_path():
+def test_notebooks_expose_checkpoint_paths_for_phase_b_and_phase_c():
+    data = json.loads((NOTEBOOK_DIR / "nb01_training_and_representation_metrics.ipynb").read_text(encoding="utf-8"))
+    config_cell_source = "".join(data["cells"][5]["source"])
+
+    assert "PHASE_C_CHECKPOINT" in config_cell_source
+    assert "print(f\"Phase C ckpt:" in config_cell_source
+
     for notebook_name in (
-        "nb01_training_and_representation_metrics.ipynb",
         "nb02_candidate_circuit_discovery_and_stability.ipynb",
         "nb03_interventions_and_qualitative_analysis.ipynb",
     ):
         data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
         config_cell_source = "".join(data["cells"][5]["source"])
 
-        assert "PHASE_C_CHECKPOINT" in config_cell_source
-        assert "print(f\"Phase C ckpt:" in config_cell_source
+        assert "phase_b.pt" in config_cell_source
+        assert "phase_c.pt" in config_cell_source
+        assert "MODEL_ORDER = [('phase_b', 'Phase B'), ('phase_c', 'Phase C')]" in config_cell_source
+
+
+def test_nb02_and_nb03_compare_phase_b_and_phase_c_outputs():
+    for notebook_name in (
+        "nb02_candidate_circuit_discovery_and_stability.ipynb",
+        "nb03_interventions_and_qualitative_analysis.ipynb",
+    ):
+        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
+        config_cell_source = "".join(data["cells"][5]["source"])
+        run_cell_source = "".join(data["cells"][7]["source"])
+
+        assert "MODEL_ORDER = [('phase_b', 'Phase B'), ('phase_c', 'Phase C')]" in config_cell_source
+        assert "for tag, label in MODEL_ORDER:" in run_cell_source
 
 
 def test_repo_text_has_no_legacy_runtime_references():
