@@ -237,15 +237,20 @@ class FlowCircuitTrainer:
         phase_epochs = self.config["training"]["phase_epochs"]
         objectives = self.config["objectives"]
 
-        history.extend(self._run_phase("phase_a", phase_epochs.get("phase_a", 0), lambda_rec=0.0, lambda_traj=0.0))
+        n_a = phase_epochs.get("phase_a", 0)
+        n_b = phase_epochs.get("phase_b", 0)
+        print(f"[train] phase_a  ({n_a} epochs)", flush=True)
+        history.extend(self._run_phase("phase_a", n_a, lambda_rec=0.0, lambda_traj=0.0))
+        print(f"[train] phase_b  ({n_b} epochs)", flush=True)
         history.extend(
             self._run_phase(
                 "phase_b",
-                phase_epochs.get("phase_b", 0),
+                n_b,
                 lambda_rec=objectives.get("lambda_rec", 0.2),
                 lambda_traj=0.0,
             )
         )
+        print("[train] running full validation...", flush=True)
         phase_b_metrics = self._full_validation_metrics(self.loaders["val"])
         self._save_checkpoint(
             name="phase_b.pt",
@@ -259,8 +264,11 @@ class FlowCircuitTrainer:
         phase_c_summary = None
 
         if mode == "aligned" and phase_epochs.get("phase_c", 0) > 0:
+            print("[train] fitting baseline regressors...", flush=True)
             baseline_regressors = self._fit_baselines()
+            print("[train] evaluating baselines...", flush=True)
             baseline_metrics = self._evaluate_baselines(baseline_regressors)
+            print(f"[train] phase_b pred_cos={phase_b_metrics.prediction_cosine_mean:.4f}  best_baseline={baseline_metrics.best_baseline:.4f}", flush=True)
             if phase_b_metrics.prediction_cosine_mean > baseline_metrics.best_baseline:
                 phase_b_snapshot = self._snapshot_state()
                 phase_c_result = self._run_phase_c_sweep(
@@ -316,6 +324,14 @@ class FlowCircuitTrainer:
                 "val": val_metrics,
             }
             results.append(result)
+            print(
+                f"[{phase} epoch {epoch_idx + 1}/{epochs}]"
+                f"  train_loss={train_metrics['loss']:.4f}"
+                f"  pred_cos={train_metrics['prediction_cosine']:.4f}"
+                f"  val_loss={val_metrics['loss']:.4f}"
+                f"  val_pred_cos={val_metrics['prediction_cosine']:.4f}",
+                flush=True,
+            )
         return results
 
     def _run_epoch(
@@ -441,9 +457,18 @@ class FlowCircuitTrainer:
         gamma_candidates = ocfg.get("traj_gamma_candidates", [ocfg.get("traj_gamma", 0.2)])
         tau_candidates = ocfg.get("traj_tau_candidates", [ocfg.get("traj_tau", 0.1)])
 
+        n_candidates = len(lambda_candidates) * len(topk_candidates) * len(gamma_candidates) * len(tau_candidates)
+        print(f"[train] phase_c sweep  ({n_candidates} candidates, {epochs} epochs each)", flush=True)
+        candidate_idx = 0
         for lambda_traj, traj_topk, traj_gamma, traj_tau in itertools.product(
             lambda_candidates, topk_candidates, gamma_candidates, tau_candidates
         ):
+            candidate_idx += 1
+            print(
+                f"[train] phase_c candidate {candidate_idx}/{n_candidates}"
+                f"  λ_traj={lambda_traj}  topk={traj_topk}  γ={traj_gamma}  τ={traj_tau}",
+                flush=True,
+            )
             self._restore_snapshot(phase_b_snapshot)
             # Fresh cosine schedule for each Phase C candidate so it decays
             # over phase_c epochs rather than inheriting Phase A+B T_max.

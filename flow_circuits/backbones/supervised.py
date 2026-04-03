@@ -82,6 +82,7 @@ class SupervisedBackboneTrainer:
             self._run_epoch(self.loaders["train"], train=True)
             val_accuracy = self._run_epoch(self.loaders["val"], train=False)
             self.scheduler.step()
+            print(f"[backbone epoch {epoch}/{self.epochs}]  val_acc={val_accuracy:.4f}", flush=True)
             if val_accuracy > best_val_accuracy:
                 best_val_accuracy = val_accuracy
                 best_epoch = epoch
