@@ -499,6 +499,7 @@ class FlowCircuitTrainer:
 
     def _run_phase_c_sweep(self, *, phase_b_snapshot: dict, phase_b_metrics: RepresentationMetrics, epochs: int) -> dict:
         best_candidate = None
+        exploratory_candidate = None
         ocfg = self.config["objectives"]
         base_lr = self.config["training"].get("lr", 1.0e-3)
         missing = object()
@@ -563,11 +564,57 @@ class FlowCircuitTrainer:
                 "metrics": metrics,
                 "snapshot": self._snapshot_state(),
             }
+            if exploratory_candidate is None or (
+                metrics.trajectory_alignment_mean > exploratory_candidate["metrics"].trajectory_alignment_mean
+                or (
+                    metrics.trajectory_alignment_mean == exploratory_candidate["metrics"].trajectory_alignment_mean
+                    and metrics.prediction_cosine_mean > exploratory_candidate["metrics"].prediction_cosine_mean
+                )
+            ):
+                exploratory_candidate = candidate
             if accepted and (
                 best_candidate is None
                 or metrics.trajectory_alignment_mean > best_candidate["metrics"].trajectory_alignment_mean
             ):
                 best_candidate = candidate
+
+        selected_phase_c_candidate = best_candidate or exploratory_candidate
+        if selected_phase_c_candidate is None:
+            self._restore_snapshot(phase_b_snapshot)
+            _pe = self.config["training"]["phase_epochs"]
+            ab_epochs = _pe.get("phase_a", 0) + _pe.get("phase_b", 0)
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(ab_epochs, 1))
+            for key, value in original_traj_config.items():
+                if value is missing:
+                    ocfg.pop(key, None)
+                else:
+                    ocfg[key] = value
+            return {
+                "accepted": False,
+                "reason": "phase_c_candidate_generation_failed",
+                "metrics": phase_b_metrics,
+            }
+
+        ocfg["lambda_traj"] = selected_phase_c_candidate["lambda_traj"]
+        ocfg["traj_topk"] = selected_phase_c_candidate["traj_topk"]
+        ocfg["traj_gamma"] = selected_phase_c_candidate["traj_gamma"]
+        ocfg["traj_tau"] = selected_phase_c_candidate["traj_tau"]
+        self._restore_snapshot(selected_phase_c_candidate["snapshot"])
+        self._save_checkpoint(
+            name="phase_c.pt",
+            phase="phase_c",
+            validation=selected_phase_c_candidate["metrics"].to_dict(),
+            extra_summary={
+                "accepted_by_rule": selected_phase_c_candidate["accepted"],
+                "phase_b_metrics": phase_b_metrics.to_dict(),
+                "phase_c_metrics": selected_phase_c_candidate["metrics"].to_dict(),
+                "lambda_traj": selected_phase_c_candidate["lambda_traj"],
+                "traj_topk": selected_phase_c_candidate["traj_topk"],
+                "traj_gamma": selected_phase_c_candidate["traj_gamma"],
+                "traj_tau": selected_phase_c_candidate["traj_tau"],
+            },
+        )
+        phase_c_checkpoint = str(self.checkpoint_dir / "phase_c.pt")
 
         if best_candidate is None:
             self._restore_snapshot(phase_b_snapshot)
@@ -585,7 +632,12 @@ class FlowCircuitTrainer:
             return {
                 "accepted": False,
                 "reason": "no_phase_c_candidate_met_acceptance_rule",
-                "metrics": phase_b_metrics,
+                "metrics": selected_phase_c_candidate["metrics"],
+                "saved_checkpoint": phase_c_checkpoint,
+                "lambda_traj": selected_phase_c_candidate["lambda_traj"],
+                "traj_topk": selected_phase_c_candidate["traj_topk"],
+                "traj_gamma": selected_phase_c_candidate["traj_gamma"],
+                "traj_tau": selected_phase_c_candidate["traj_tau"],
             }
 
         # Persist the winning hyperparameters in config so the saved checkpoint
@@ -604,6 +656,7 @@ class FlowCircuitTrainer:
             "traj_gamma": best_candidate["traj_gamma"],
             "traj_tau": best_candidate["traj_tau"],
             "metrics": best_candidate["metrics"],
+            "saved_checkpoint": phase_c_checkpoint,
         }
 
     def _snapshot_state(self) -> dict:

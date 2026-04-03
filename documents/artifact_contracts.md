@@ -12,6 +12,7 @@ Producer:
 Typical filenames:
 
 - `phase_b.pt`
+- `phase_c.pt`
 - `final.pt`
 
 Current required top-level fields:
@@ -31,7 +32,7 @@ Current required top-level fields:
 Meaning:
 
 - `version`: checkpoint schema version
-- `phase`: accepted model phase, usually `phase_b` or `phase_c`
+- `phase`: checkpoint model phase, usually `phase_b` or `phase_c`
 - `config`: full experiment config used to build components
 - `*_state`: serialized PyTorch state dicts
 - `validation`: final validation metrics snapshot
@@ -246,6 +247,7 @@ Typical experiment-local output layout:
 ```text
 experiments/flow/<experiment_name>/
   phase_b.pt
+  phase_c.pt
   final.pt
   candidate_circuits.json
   test_evaluation.json

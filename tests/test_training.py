@@ -101,10 +101,17 @@ def test_phase_c_rejection_restores_phase_b_checkpoint_config(monkeypatch, align
     summary = trainer.train()
     checkpoint_path = Path(aligned_config["logging"]["checkpoint_dir"], "final.pt")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    phase_c_path = Path(aligned_config["logging"]["checkpoint_dir"], "phase_c.pt")
+    phase_c_checkpoint = torch.load(phase_c_path, map_location="cpu", weights_only=False)
 
     assert summary["final_phase"] == "phase_b"
     assert summary["phase_c"]["accepted"] is False
     assert checkpoint["phase"] == "phase_b"
+    assert phase_c_path.exists()
+    assert phase_c_checkpoint["phase"] == "phase_c"
+    assert summary["phase_c"]["saved_checkpoint"] == str(phase_c_path)
+    assert summary["phase_c"]["metrics"].prediction_cosine_mean == 0.27
+    assert phase_c_checkpoint["config"]["objectives"]["lambda_traj"] == 0.1
     assert checkpoint["config"]["objectives"].get("lambda_traj") is None
     assert checkpoint["config"]["objectives"]["traj_topk"] == aligned_config["objectives"]["traj_topk"]
     assert checkpoint["config"]["objectives"]["traj_gamma"] == aligned_config["objectives"]["traj_gamma"]
@@ -148,11 +155,16 @@ def test_phase_c_acceptance_persists_winning_checkpoint_config(monkeypatch, alig
     summary = trainer.train()
     checkpoint_path = Path(aligned_config["logging"]["checkpoint_dir"], "final.pt")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    phase_c_path = Path(aligned_config["logging"]["checkpoint_dir"], "phase_c.pt")
+    phase_c_checkpoint = torch.load(phase_c_path, map_location="cpu", weights_only=False)
     loaded = load_components_from_checkpoint(checkpoint_path, device=torch.device("cpu"))
 
     assert summary["final_phase"] == "phase_c"
     assert summary["phase_c"]["accepted"] is True
     assert checkpoint["phase"] == "phase_c"
+    assert phase_c_path.exists()
+    assert phase_c_checkpoint["phase"] == "phase_c"
+    assert summary["phase_c"]["saved_checkpoint"] == str(phase_c_path)
     assert checkpoint["config"]["objectives"]["lambda_traj"] == 0.1
     assert checkpoint["config"]["objectives"]["traj_topk"] == 2
     assert checkpoint["config"]["objectives"]["traj_gamma"] == 0.0

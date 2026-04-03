@@ -136,6 +136,19 @@ def test_notebooks_auto_resume_from_phase_b_checkpoint():
         assert "'--resume', str(RESUME_CHECKPOINT)" in run_cell_source
 
 
+def test_notebooks_expose_phase_c_checkpoint_path():
+    for notebook_name in (
+        "nb01_training_and_representation_metrics.ipynb",
+        "nb02_candidate_circuit_discovery_and_stability.ipynb",
+        "nb03_interventions_and_qualitative_analysis.ipynb",
+    ):
+        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
+        config_cell_source = "".join(data["cells"][5]["source"])
+
+        assert "PHASE_C_CHECKPOINT" in config_cell_source
+        assert "print(f\"Phase C ckpt:" in config_cell_source
+
+
 def test_repo_text_has_no_legacy_runtime_references():
     offenders: list[str] = []
     for path in _iter_repo_text_files():

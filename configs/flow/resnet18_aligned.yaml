@@ -33,7 +33,7 @@ encoder:
 objectives:
   lambda_pred: 1.0
   lambda_rec: 0.2
-  lambda_traj_candidates: [0.1, 0.2, 0.5]
+  lambda_traj_candidates: [0.1]
   traj_topk_candidates: [8]
   traj_gamma_candidates: [0.2]
   traj_tau_candidates: [0.1]
@@ -45,7 +45,7 @@ training:
   phase_epochs:
     phase_a: 20
     phase_b: 20
-    phase_c: 10
+    phase_c: 20
   baseline_fit_images: 2048
   baseline_eval_images: 2048
   baseline_hidden_dim: 256

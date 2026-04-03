@@ -65,6 +65,7 @@ flow-train --config configs/flow/resnet18_base.yaml
 - Phase A: `L_pred`
 - Phase B: `L_pred + L_rec`
 - Phase C: optional `L_traj`, enabled only after the Phase B baseline gate is passed
+- The canonical aligned config now evaluates one Phase C lambda candidate for 20 epochs and always saves the resulting `phase_c.pt` checkpoint for downstream comparison
 
 Phase C is retained only if external trajectory alignment improves and one-step prediction remains within the Phase B acceptance window.
 
@@ -89,7 +90,12 @@ flow-train --config configs/flow/resnet18_aligned.yaml
 Important outputs:
 
 - `phase_b.pt`
+- `phase_c.pt`
 - `final.pt`
+
+`phase_b.pt` is the predictive anchor checkpoint.
+`phase_c.pt` is always kept as the trajectory-aligned exploratory checkpoint.
+`final.pt` remains the accepted model checkpoint after the Phase C selection rule is applied.
 
 If an aligned run is interrupted after Phase B has already been saved, you can resume from that checkpoint instead of retraining Phase A+B:
 
