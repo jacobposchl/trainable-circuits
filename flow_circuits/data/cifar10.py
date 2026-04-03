@@ -53,6 +53,16 @@ def _split_indices(seed: int) -> dict[str, list[int]]:
     }
 
 
+def _backbone_split_indices(seed: int, val_size: int = 5000) -> dict[str, list[int]]:
+    generator = torch.Generator().manual_seed(seed)
+    permutation = torch.randperm(50000, generator=generator).tolist()
+    train_size = max(0, 50000 - val_size)
+    return {
+        "train": permutation[:train_size],
+        "val": permutation[train_size:],
+    }
+
+
 def _seed_worker(worker_id: int) -> None:
     worker_seed = torch.initial_seed() % (2**32)
     np.random.seed(worker_seed)
@@ -111,5 +121,53 @@ def build_cifar10_splits(
         "fit": fit_loader,
         "val": val_loader,
         "discovery": discovery_loader,
+        "test": test_loader,
+    }
+
+
+def build_supervised_cifar10_loaders(
+    *,
+    data_dir: str,
+    batch_size: int,
+    num_workers: int = 4,
+    seed: int = 0,
+    augment_train: bool = True,
+    download: bool = True,
+    val_size: int = 5000,
+) -> dict[str, DataLoader]:
+    train_aug = CIFAR10(data_dir, train=True, download=download, transform=cifar10_transforms(augment_train))
+    train_eval = CIFAR10(data_dir, train=True, download=download, transform=cifar10_transforms(False))
+    test_ds = CIFAR10(data_dir, train=False, download=download, transform=cifar10_transforms(False))
+    split_indices = _backbone_split_indices(seed, val_size=val_size)
+    train_generator = torch.Generator().manual_seed(seed)
+
+    train_loader = DataLoader(
+        IndexedDataset(train_aug, split_indices["train"]),
+        batch_size=batch_size,
+        shuffle=True,
+        generator=train_generator,
+        num_workers=num_workers,
+        pin_memory=True,
+        worker_init_fn=_seed_worker,
+    )
+    val_loader = DataLoader(
+        IndexedDataset(train_eval, split_indices["val"]),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        worker_init_fn=_seed_worker,
+    )
+    test_loader = DataLoader(
+        IndexedDataset(test_ds),
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=True,
+        worker_init_fn=_seed_worker,
+    )
+    return {
+        "train": train_loader,
+        "val": val_loader,
         "test": test_loader,
     }

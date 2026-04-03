@@ -86,11 +86,21 @@ def load_components_from_checkpoint(
 ) -> LoadedFlowComponents:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["config"]
-    components = build_components(config, device)
+    build_config = deepcopy(config)
+    build_config.setdefault("backbone", {})
+    build_config["backbone"]["weights_path"] = None
+    build_config["backbone"]["require_trained_checkpoint"] = False
+    build_config["backbone"]["pretrained"] = False
+    components = build_components(build_config, device)
     components.observer.load_state_dict(checkpoint["observer_state"])
     components.tokenizer.load_state_dict(checkpoint["tokenizer_state"])
     components.encoder.load_state_dict(checkpoint["encoder_state"])
     components.objective.load_state_dict(checkpoint["objective_state"])
+    observer_metadata = checkpoint.get("observer_metadata", {})
+    components.observer.classifier_is_trained = bool(observer_metadata.get("classifier_is_trained", False))
+    components.observer.weights_path = config["backbone"].get("weights_path")
+    components.observer.require_trained_checkpoint = config["backbone"].get("require_trained_checkpoint", False)
+    components.config = config
     components.checkpoint = checkpoint
     components.observer.eval()
     components.tokenizer.eval()
@@ -528,6 +538,9 @@ class FlowCircuitTrainer:
             "phase": phase,
             "config": self.config,
             "observer_state": self.components.observer.state_dict(),
+            "observer_metadata": {
+                "classifier_is_trained": bool(self.components.observer.classifier_is_trained),
+            },
             "tokenizer_state": self.components.tokenizer.state_dict(),
             "encoder_state": self.components.encoder.state_dict(),
             "objective_state": self.components.objective.state_dict(),

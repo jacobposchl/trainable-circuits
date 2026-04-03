@@ -120,18 +120,14 @@ class FrozenResNetObserver(nn.Module):
         weights_path: str | None,
         require_trained_checkpoint: bool,
     ) -> tuple[nn.Module, list[nn.Module], list[nn.Module], list[str]]:
-        weights = "IMAGENET1K_V1" if pretrained else None
-        model: nn.Module = getattr(tvm, arch)(weights=weights)
-
-        model = self._adapt_for_cifar(model, pretrained=pretrained, num_classes=num_classes)
+        model = build_cifar_resnet_classifier(
+            arch=arch,
+            pretrained=pretrained,
+            num_classes=num_classes,
+            weights_path=weights_path,
+        )
 
         if weights_path:
-            state_dict = _load_checkpoint_state_dict(Path(weights_path))
-            missing, unexpected = model.load_state_dict(state_dict, strict=False)
-            if unexpected:
-                raise ValueError(f"Unexpected keys in weights_path: {sorted(unexpected)}")
-            if missing:
-                raise ValueError(f"Missing keys in weights_path: {sorted(missing)}")
             self.classifier_is_trained = True
         elif pretrained and model.fc.out_features == 1000:
             # If the classifier head is preserved from torchvision weights, logits
@@ -158,31 +154,52 @@ class FrozenResNetObserver(nn.Module):
         return model, blocks, flow_modules, layer_names
 
     @staticmethod
-    def _adapt_for_cifar(model: nn.Module, *, pretrained: bool, num_classes: int) -> nn.Module:
-        in_features = model.fc.in_features
-        if model.fc.out_features != num_classes:
-            model.fc = nn.Linear(in_features, num_classes)
-
-        if (
-            model.conv1.kernel_size != (3, 3)
-            or model.conv1.stride != (1, 1)
-            or model.conv1.padding != (1, 1)
-        ):
-            stem = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-            if pretrained:
-                with torch.no_grad():
-                    stem.weight.copy_(_resize_stem(model.conv1.weight.data))
-            model.conv1 = stem
-        return model
-
-    @staticmethod
     def _block_out_channels(block: nn.Module) -> int:
         if hasattr(block, "bn3"):
             return int(block.bn3.num_features)
         return int(block.bn2.num_features)
 
 
-def _load_checkpoint_state_dict(path: Path) -> dict[str, torch.Tensor]:
+def build_cifar_resnet_classifier(
+    *,
+    arch: str,
+    pretrained: bool,
+    num_classes: int,
+    weights_path: str | None = None,
+) -> nn.Module:
+    weights = "IMAGENET1K_V1" if pretrained else None
+    model: nn.Module = getattr(tvm, arch)(weights=weights)
+    model = _adapt_model_for_cifar(model, pretrained=pretrained, num_classes=num_classes)
+    if weights_path:
+        state_dict = load_checkpoint_state_dict(Path(weights_path))
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if unexpected:
+            raise ValueError(f"Unexpected keys in weights_path: {sorted(unexpected)}")
+        if missing:
+            raise ValueError(f"Missing keys in weights_path: {sorted(missing)}")
+    model.maxpool = nn.Identity()
+    return model
+
+
+def _adapt_model_for_cifar(model: nn.Module, *, pretrained: bool, num_classes: int) -> nn.Module:
+    in_features = model.fc.in_features
+    if model.fc.out_features != num_classes:
+        model.fc = nn.Linear(in_features, num_classes)
+
+    if (
+        model.conv1.kernel_size != (3, 3)
+        or model.conv1.stride != (1, 1)
+        or model.conv1.padding != (1, 1)
+    ):
+        stem = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        if pretrained:
+            with torch.no_grad():
+                stem.weight.copy_(_resize_stem(model.conv1.weight.data))
+        model.conv1 = stem
+    return model
+
+
+def load_checkpoint_state_dict(path: Path) -> dict[str, torch.Tensor]:
     if not path.exists():
         raise FileNotFoundError(f"Backbone checkpoint not found: {path}")
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
