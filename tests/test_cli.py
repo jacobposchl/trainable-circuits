@@ -15,17 +15,20 @@ from flow_circuits.cli import train as train_cli
 def test_train_cli_invokes_trainer(monkeypatch, minimal_config, tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(minimal_config), encoding="utf-8")
+    seen = {}
 
     class DummyTrainer:
-        def __init__(self, config):
+        def __init__(self, config, *, resume_from=None):
             self.config = config
+            seen["resume_from"] = resume_from
 
         def train(self):
             return {"ok": True}
 
     monkeypatch.setattr(train_cli, "FlowCircuitTrainer", DummyTrainer)
-    monkeypatch.setattr(sys, "argv", ["flow-train", "--config", str(config_path)])
+    monkeypatch.setattr(sys, "argv", ["flow-train", "--config", str(config_path), "--resume", "phase_b.pt"])
     train_cli.main()
+    assert seen["resume_from"] == "phase_b.pt"
 
 
 def test_evaluate_cli_writes_json(monkeypatch, tmp_path):

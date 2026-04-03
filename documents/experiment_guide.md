@@ -91,6 +91,12 @@ Important outputs:
 - `phase_b.pt`
 - `final.pt`
 
+If an aligned run is interrupted after Phase B has already been saved, you can resume from that checkpoint instead of retraining Phase A+B:
+
+```bash
+flow-train --config configs/flow/resnet18_aligned.yaml --resume experiments/flow/resnet18_aligned/phase_b.pt
+```
+
 ### 2. Evaluation Summary
 
 `flow-evaluate` writes a JSON summary containing:

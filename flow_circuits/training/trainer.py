@@ -205,10 +205,12 @@ def collect_baseline_features(
 
 
 class FlowCircuitTrainer:
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, *, resume_from: str | Path | None = None) -> None:
         self.config = config
         seed_everything(config["data"].get("seed", 0))
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.resume_from = Path(resume_from) if resume_from is not None else None
+        self.resume_checkpoint: dict | None = None
         self.components = build_components(config, self.device)
         self.loaders = build_cifar10_splits(
             data_dir=config["data"]["data_dir"],
@@ -231,37 +233,58 @@ class FlowCircuitTrainer:
         _pe = config["training"]["phase_epochs"]
         ab_epochs = _pe.get("phase_a", 0) + _pe.get("phase_b", 0)
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(ab_epochs, 1))
+        if self.resume_from is not None:
+            self._load_training_checkpoint(self.resume_from)
 
     def train(self) -> dict:
         history = []
         phase_epochs = self.config["training"]["phase_epochs"]
         objectives = self.config["objectives"]
+        resumed_phase = self.resume_checkpoint.get("phase") if self.resume_checkpoint is not None else None
 
-        n_a = phase_epochs.get("phase_a", 0)
-        n_b = phase_epochs.get("phase_b", 0)
-        _log_section(f"Phase A — Prediction  ({n_a} epoch{'s' if n_a != 1 else ''})")
-        _log("The encoder learns to predict how each ResNet layer's residual flow")
-        _log("will change into the next layer (next-step prediction objective).")
-        history.extend(self._run_phase("phase_a", n_a, lambda_rec=0.0, lambda_traj=0.0))
-        _log_section(f"Phase B — Prediction + Reconstruction  ({n_b} epoch{'s' if n_b != 1 else ''})")
-        _log("Adds a reconstruction objective: the encoder must also recover the")
-        _log("current layer's flow from its own output.")
-        history.extend(
-            self._run_phase(
-                "phase_b",
-                n_b,
-                lambda_rec=objectives.get("lambda_rec", 0.2),
-                lambda_traj=0.0,
+        if resumed_phase == "phase_c":
+            _log_section("Resume")
+            _log(f"Loaded completed Phase C checkpoint from: {self.resume_from}")
+            _log("Training is already complete; reusing the saved final summary.")
+            return self.resume_checkpoint.get("summary") or {
+                "history": [],
+                "final_phase": "phase_c",
+                "final_metrics": self.resume_checkpoint.get("validation", {}),
+                "phase_c": {"accepted": True},
+            }
+
+        if resumed_phase == "phase_b":
+            _log_section("Resume")
+            _log(f"Loaded Phase B checkpoint from: {self.resume_from}")
+            _log("Skipping Phases A and B and continuing from the saved checkpoint state.")
+            history = list(self.resume_checkpoint.get("summary", {}).get("history", []))
+            phase_b_metrics = RepresentationMetrics(**self.resume_checkpoint.get("validation", {}))
+        else:
+            n_a = phase_epochs.get("phase_a", 0)
+            n_b = phase_epochs.get("phase_b", 0)
+            _log_section(f"Phase A - Prediction  ({n_a} epoch{'s' if n_a != 1 else ''})")
+            _log("The encoder learns to predict how each ResNet layer's residual flow")
+            _log("will change into the next layer (next-step prediction objective).")
+            history.extend(self._run_phase("phase_a", n_a, lambda_rec=0.0, lambda_traj=0.0))
+            _log_section(f"Phase B - Prediction + Reconstruction  ({n_b} epoch{'s' if n_b != 1 else ''})")
+            _log("Adds a reconstruction objective: the encoder must also recover the")
+            _log("current layer's flow from its own output.")
+            history.extend(
+                self._run_phase(
+                    "phase_b",
+                    n_b,
+                    lambda_rec=objectives.get("lambda_rec", 0.2),
+                    lambda_traj=0.0,
+                )
             )
-        )
-        _log("\nRunning held-out validation...")
-        phase_b_metrics = self._full_validation_metrics(self.loaders["val"])
-        _log(f"  pred_cos={phase_b_metrics.prediction_cosine_mean:.4f}  recon_cos={phase_b_metrics.reconstruction_cosine_mean:.4f}")
-        self._save_checkpoint(
-            name="phase_b.pt",
-            phase="phase_b",
-            validation=phase_b_metrics.to_dict(),
-        )
+            _log("\nRunning held-out validation...")
+            phase_b_metrics = self._full_validation_metrics(self.loaders["val"])
+            _log(f"  pred_cos={phase_b_metrics.prediction_cosine_mean:.4f}  recon_cos={phase_b_metrics.reconstruction_cosine_mean:.4f}")
+            self._save_checkpoint(
+                name="phase_b.pt",
+                phase="phase_b",
+                validation=phase_b_metrics.to_dict(),
+            )
 
         mode = self.config["experiment"].get("mode", "base")
         final_phase = "phase_b"
@@ -286,10 +309,10 @@ class FlowCircuitTrainer:
                 _log("  Phase C (trajectory alignment sweep) will now run.")
                 phase_b_snapshot = self._snapshot_state()
                 phase_c_result = self._run_phase_c_sweep(
-                phase_b_snapshot=phase_b_snapshot,
-                phase_b_metrics=phase_b_metrics,
-                epochs=phase_epochs["phase_c"],
-            )
+                    phase_b_snapshot=phase_b_snapshot,
+                    phase_b_metrics=phase_b_metrics,
+                    epochs=phase_epochs["phase_c"],
+                )
                 phase_c_summary = phase_c_result
                 if phase_c_result["accepted"]:
                     final_phase = "phase_c"
@@ -477,6 +500,7 @@ class FlowCircuitTrainer:
     def _run_phase_c_sweep(self, *, phase_b_snapshot: dict, phase_b_metrics: RepresentationMetrics, epochs: int) -> dict:
         best_candidate = None
         ocfg = self.config["objectives"]
+        base_lr = self.config["training"].get("lr", 1.0e-3)
         missing = object()
         original_traj_config = {
             key: ocfg.get(key, missing)
@@ -502,6 +526,7 @@ class FlowCircuitTrainer:
             candidate_idx += 1
             _log(f"  Candidate {candidate_idx}/{n_candidates}  lambda_traj={lambda_traj}  topk={traj_topk}  gamma={traj_gamma}  tau={traj_tau}")
             self._restore_snapshot(phase_b_snapshot)
+            self._reset_optimizer_lr(base_lr)
             # Fresh cosine schedule for each Phase C candidate so it decays
             # over phase_c epochs rather than inheriting Phase A+B T_max.
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(epochs, 1))
@@ -598,6 +623,23 @@ class FlowCircuitTrainer:
         self.components.objective.load_state_dict(snapshot["objective"])
         self.optimizer.load_state_dict(snapshot["optimizer"])
         self.scheduler.load_state_dict(snapshot["scheduler"])
+
+    def _reset_optimizer_lr(self, lr: float) -> None:
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
+            param_group["initial_lr"] = lr
+
+    def _load_training_checkpoint(self, checkpoint_path: Path) -> None:
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        self.components.observer.load_state_dict(checkpoint["observer_state"])
+        self.components.tokenizer.load_state_dict(checkpoint["tokenizer_state"])
+        self.components.encoder.load_state_dict(checkpoint["encoder_state"])
+        self.components.objective.load_state_dict(checkpoint["objective_state"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state"])
+        self.scheduler.load_state_dict(checkpoint["scheduler_state"])
+        observer_metadata = checkpoint.get("observer_metadata", {})
+        self.components.observer.classifier_is_trained = bool(observer_metadata.get("classifier_is_trained", False))
+        self.resume_checkpoint = checkpoint
 
     def _save_checkpoint(
         self,

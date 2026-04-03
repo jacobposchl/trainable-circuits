@@ -159,3 +159,94 @@ def test_phase_c_acceptance_persists_winning_checkpoint_config(monkeypatch, alig
     assert checkpoint["config"]["objectives"]["traj_tau"] == 0.2
     assert loaded.checkpoint["phase"] == "phase_c"
     assert loaded.config["objectives"]["lambda_traj"] == 0.1
+
+
+def test_phase_c_resets_learning_rate_before_candidate_sweep(monkeypatch, aligned_config, tiny_loader):
+    monkeypatch.setattr(
+        "flow_circuits.training.trainer.build_cifar10_splits",
+        lambda **kwargs: {"fit": tiny_loader, "val": tiny_loader, "discovery": tiny_loader, "test": tiny_loader},
+    )
+    trainer = FlowCircuitTrainer(copy.deepcopy(aligned_config))
+    phase_c_lrs = []
+    original_run_phase = trainer._run_phase
+
+    def wrapped_run_phase(phase, epochs, *, lambda_rec, lambda_traj):
+        if phase == "phase_c":
+            phase_c_lrs.append(trainer.optimizer.param_groups[0]["lr"])
+            return []
+        return original_run_phase(phase, epochs, lambda_rec=lambda_rec, lambda_traj=lambda_traj)
+
+    monkeypatch.setattr(trainer, "_run_phase", wrapped_run_phase)
+    metrics_sequence = iter(
+        [
+            RepresentationMetrics(
+                prediction_cosine_mean=0.30,
+                prediction_cosine_sem=0.01,
+                reconstruction_cosine_mean=0.10,
+                reconstruction_cosine_sem=0.01,
+                trajectory_alignment_mean=0.20,
+                trajectory_alignment_std=0.0,
+            ),
+            RepresentationMetrics(
+                prediction_cosine_mean=0.295,
+                prediction_cosine_sem=0.01,
+                reconstruction_cosine_mean=0.10,
+                reconstruction_cosine_sem=0.01,
+                trajectory_alignment_mean=0.24,
+                trajectory_alignment_std=0.0,
+            ),
+        ]
+    )
+    monkeypatch.setattr(trainer, "_full_validation_metrics", lambda loader: next(metrics_sequence))
+    monkeypatch.setattr(
+        trainer,
+        "_evaluate_baselines",
+        lambda regressors: BaselineComparison(0.20, 0.20, 0.20, 0.20),
+    )
+
+    trainer.train()
+
+    assert phase_c_lrs == [aligned_config["training"]["lr"]]
+
+
+def test_resume_from_phase_b_skips_retraining_ab(monkeypatch, aligned_config, tiny_loader):
+    monkeypatch.setattr(
+        "flow_circuits.training.trainer.build_cifar10_splits",
+        lambda **kwargs: {"fit": tiny_loader, "val": tiny_loader, "discovery": tiny_loader, "test": tiny_loader},
+    )
+    initial_trainer = FlowCircuitTrainer(copy.deepcopy(aligned_config))
+    initial_trainer.train()
+    phase_b_path = Path(aligned_config["logging"]["checkpoint_dir"], "phase_b.pt")
+
+    resumed_trainer = FlowCircuitTrainer(copy.deepcopy(aligned_config), resume_from=phase_b_path)
+    seen_phases = []
+
+    def wrapped_run_phase(phase, epochs, *, lambda_rec, lambda_traj):
+        seen_phases.append(phase)
+        return []
+
+    metrics_sequence = iter(
+        [
+            RepresentationMetrics(
+                prediction_cosine_mean=0.295,
+                prediction_cosine_sem=0.01,
+                reconstruction_cosine_mean=0.10,
+                reconstruction_cosine_sem=0.01,
+                trajectory_alignment_mean=0.24,
+                trajectory_alignment_std=0.0,
+            ),
+        ]
+    )
+    monkeypatch.setattr(resumed_trainer, "_run_phase", wrapped_run_phase)
+    monkeypatch.setattr(resumed_trainer, "_full_validation_metrics", lambda loader: next(metrics_sequence))
+    monkeypatch.setattr(
+        resumed_trainer,
+        "_evaluate_baselines",
+        lambda regressors: BaselineComparison(0.20, 0.20, 0.20, 0.20),
+    )
+
+    summary = resumed_trainer.train()
+
+    assert seen_phases == ["phase_c"]
+    assert summary["final_phase"] == "phase_b"
+    assert summary["phase_c"]["accepted"] is False

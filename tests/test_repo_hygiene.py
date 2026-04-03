@@ -123,6 +123,19 @@ def test_nb02_and_nb03_phase_c_schedule_matches_nb01_behavior():
         assert "effective_phase_epochs['phase_c'] = 0" in mode_cell_source
 
 
+def test_notebooks_auto_resume_from_phase_b_checkpoint():
+    for notebook_name, cell_index in (
+        ("nb01_training_and_representation_metrics.ipynb", 7),
+        ("nb02_candidate_circuit_discovery_and_stability.ipynb", 7),
+        ("nb03_interventions_and_qualitative_analysis.ipynb", 7),
+    ):
+        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
+        run_cell_source = "".join(data["cells"][cell_index]["source"])
+
+        assert "RESUME_CHECKPOINT = PHASE_B_CHECKPOINT" in run_cell_source
+        assert "'--resume', str(RESUME_CHECKPOINT)" in run_cell_source
+
+
 def test_repo_text_has_no_legacy_runtime_references():
     offenders: list[str] = []
     for path in _iter_repo_text_files():
