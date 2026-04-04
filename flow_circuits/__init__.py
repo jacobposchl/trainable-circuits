@@ -2,6 +2,11 @@ from flow_circuits.backbones import FrozenResNetObserver, ResNetObservations
 from flow_circuits.discovery import CandidateCircuitDiscoverer
 from flow_circuits.encoders import SpatiotemporalEncoder
 from flow_circuits.evaluation import BaselineComparison, RepresentationMetrics, evaluate_representation_metrics
+from flow_circuits.evaluation.q_validation import run_q_checkpoint_validation_experiment
+from flow_circuits.evaluation.motif_utility import (
+    run_motif_clean_utility_experiment,
+    run_motif_corruption_utility_experiment,
+)
 from flow_circuits.evaluation.efficient_validation import (
     EFFICIENT_EXPERIMENT_IDS,
     run_activation_probe_experiment,
@@ -30,6 +35,7 @@ from flow_circuits.interventions import (
 from flow_circuits.objectives import FlowObjective
 from flow_circuits.tokenization import FlowTokenizer
 from flow_circuits.training import FlowCircuitTrainer
+from flow_circuits.training import load_yaml_config, run_backbone_and_z_training_workflow
 
 __all__ = [
     "EFFICIENT_EXPERIMENT_IDS",
@@ -39,6 +45,8 @@ __all__ = [
     "CandidateCircuitDiscoverer",
     "discover_motif_families",
     "FlowCircuitTrainer",
+    "load_yaml_config",
+    "run_backbone_and_z_training_workflow",
     "FlowObjective",
     "FlowTokenizer",
     "FrozenResNetObserver",
@@ -60,5 +68,8 @@ __all__ = [
     "run_motif_transfer_stability_experiment",
     "run_neighbor_agreement_experiment",
     "run_circuit_interventions",
+    "run_motif_clean_utility_experiment",
+    "run_motif_corruption_utility_experiment",
+    "run_q_checkpoint_validation_experiment",
     "run_topk_intervention_experiment",
 ]

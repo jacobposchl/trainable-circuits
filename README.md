@@ -82,9 +82,10 @@ The repo now standardizes four artifact types:
 
 The first-class notebook suite is:
 
-- [notebooks/nb01_training_and_representation_metrics.ipynb](notebooks/nb01_training_and_representation_metrics.ipynb)
-- [notebooks/nb02_candidate_circuit_discovery_and_stability.ipynb](notebooks/nb02_candidate_circuit_discovery_and_stability.ipynb)
-- [notebooks/nb03_interventions_and_qualitative_analysis.ipynb](notebooks/nb03_interventions_and_qualitative_analysis.ipynb)
+- [notebooks/nb01_backbone_and_z_training.ipynb](notebooks/nb01_backbone_and_z_training.ipynb)
+- [notebooks/nb02_q_validation.ipynb](notebooks/nb02_q_validation.ipynb)
+- [notebooks/nb03_z_motif_discovery_and_analysis.ipynb](notebooks/nb03_z_motif_discovery_and_analysis.ipynb)
+- [notebooks/nb04_motif_utility_and_robustness.ipynb](notebooks/nb04_motif_utility_and_robustness.ipynb)
 
 Each notebook is Colab-ready: the setup cell clones or updates this GitHub repo under `/content/model_interpretability`, installs the package, mounts Google Drive, and stores checkpoints plus derived artifacts under `MyDrive/flow_circuits/`.
 

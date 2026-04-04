@@ -46,6 +46,16 @@ from flow_circuits.evaluation.corruption_selective_correction import (
     run_corruption_sweep_experiment,
     run_top_node_subset_sweep_experiment,
 )
+from flow_circuits.evaluation.motif_utility import (
+    MOTIF_CLEAN_UTILITY_ID,
+    MOTIF_CORRUPTION_UTILITY_ID,
+    run_motif_clean_utility_experiment,
+    run_motif_corruption_utility_experiment,
+)
+from flow_circuits.evaluation.q_validation import (
+    Q_VALIDATION_EXPERIMENT_ID,
+    run_q_checkpoint_validation_experiment,
+)
 
 __all__ = [
     "BaselineComparison",
@@ -55,6 +65,9 @@ __all__ = [
     "CORE_MOTIF_EXPERIMENT_IDS",
     "ConfirmatoryCheck",
     "EXTENDED_MOTIF_EXPERIMENT_IDS",
+    "MOTIF_CLEAN_UTILITY_ID",
+    "MOTIF_CORRUPTION_UTILITY_ID",
+    "Q_VALIDATION_EXPERIMENT_ID",
     "RepresentationMetrics",
     "bootstrap_mean_ci",
     "compute_alignment_scores",
@@ -85,5 +98,8 @@ __all__ = [
     "run_multiclass_z_probe_audit_experiment",
     "run_selective_hybrid_correction_experiment",
     "run_corruption_sweep_experiment",
+    "run_motif_clean_utility_experiment",
+    "run_motif_corruption_utility_experiment",
+    "run_q_checkpoint_validation_experiment",
     "run_top_node_subset_sweep_experiment",
 ]

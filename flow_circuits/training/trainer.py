@@ -33,6 +33,39 @@ class LoadedFlowComponents:
     checkpoint: dict
 
 
+def save_flow_checkpoint(
+    *,
+    path: str | Path,
+    components: LoadedFlowComponents,
+    optimizer: torch.optim.Optimizer | None,
+    scheduler: torch.optim.lr_scheduler._LRScheduler | None,
+    config: dict,
+    phase: str,
+    validation: dict,
+    extra_summary: dict | None = None,
+) -> None:
+    checkpoint = {
+        "version": 1,
+        "phase": phase,
+        "config": config,
+        "observer_state": components.observer.state_dict(),
+        "observer_metadata": {
+            "classifier_is_trained": bool(components.observer.classifier_is_trained),
+            "freeze_backbone": bool(getattr(components.observer, "freeze_backbone", True)),
+        },
+        "tokenizer_state": components.tokenizer.state_dict(),
+        "encoder_state": components.encoder.state_dict(),
+        "objective_state": components.objective.state_dict(),
+        "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
+        "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+        "validation": validation,
+        "summary": extra_summary or {},
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(checkpoint, path)
+
+
 def build_components(config: dict, device: torch.device) -> LoadedFlowComponents:
     bcfg = config["backbone"]
     tcfg = config["tokenization"]
@@ -46,6 +79,7 @@ def build_components(config: dict, device: torch.device) -> LoadedFlowComponents
         grid_size=tcfg.get("grid_size", 4),
         weights_path=bcfg.get("weights_path"),
         require_trained_checkpoint=bcfg.get("require_trained_checkpoint", False),
+        freeze_backbone=bcfg.get("freeze_backbone", True),
     ).to(device)
     tokenizer = FlowTokenizer(
         layer_channels=observer.layer_channels,
@@ -84,6 +118,8 @@ def build_components(config: dict, device: torch.device) -> LoadedFlowComponents
 def load_components_from_checkpoint(
     checkpoint_path: str | Path,
     device: torch.device,
+    *,
+    config_overrides: dict | None = None,
 ) -> LoadedFlowComponents:
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     config = checkpoint["config"]
@@ -92,6 +128,13 @@ def load_components_from_checkpoint(
     build_config["backbone"]["weights_path"] = None
     build_config["backbone"]["require_trained_checkpoint"] = False
     build_config["backbone"]["pretrained"] = False
+    if config_overrides:
+        for key, value in config_overrides.items():
+            if isinstance(value, dict):
+                build_config.setdefault(key, {})
+                build_config[key].update(value)
+            else:
+                build_config[key] = value
     components = build_components(build_config, device)
     components.observer.load_state_dict(checkpoint["observer_state"])
     components.tokenizer.load_state_dict(checkpoint["tokenizer_state"])
@@ -101,9 +144,10 @@ def load_components_from_checkpoint(
     components.observer.classifier_is_trained = bool(observer_metadata.get("classifier_is_trained", False))
     components.observer.weights_path = config["backbone"].get("weights_path")
     components.observer.require_trained_checkpoint = config["backbone"].get("require_trained_checkpoint", False)
-    components.config = config
+    components.observer.freeze_backbone = bool(build_config["backbone"].get("freeze_backbone", config["backbone"].get("freeze_backbone", True)))
+    components.config = build_config
     components.checkpoint = checkpoint
-    components.observer.eval()
+    components.observer.train(False)
     components.tokenizer.eval()
     components.encoder.eval()
     components.objective.eval()
@@ -140,7 +184,7 @@ def collect_model_outputs(
     with torch.no_grad():
         for batch_idx, (images, labels, indices) in enumerate(loader, start=1):
             device_images = images.to(device)
-            tokenized, z, objective_output = _forward_pass(components, device_images, lambda_rec=1.0, lambda_traj=0.0)
+            tokenized, z, objective_output, logits = _forward_pass(components, device_images, lambda_rec=1.0, lambda_traj=0.0)
             outputs["z"].append(z.cpu())
             if outputs["local_features"] is None:
                 outputs["local_features"] = [[] for _ in tokenized.local_features]
@@ -151,8 +195,7 @@ def collect_model_outputs(
             outputs["predicted_next"].append(objective_output.predicted_next.cpu())
             outputs["reconstructed_current"].append(objective_output.reconstructed_current.cpu())
             outputs["images"].append(images.cpu())
-            with torch.no_grad():
-                outputs["logits"].append(components.observer.model(device_images).cpu())
+            outputs["logits"].append(logits.detach().cpu())
             outputs["labels"].append(labels.cpu())
             outputs["indices"].append(indices.cpu())
             seen += device_images.shape[0]
@@ -442,6 +485,8 @@ class FlowCircuitTrainer:
         self.resume_from = Path(resume_from) if resume_from is not None else None
         self.resume_checkpoint: dict | None = None
         self.components = build_components(config, self.device)
+        freeze_backbone = bool(config.get("backbone", {}).get("freeze_backbone", True))
+        self.train_backbone = (not freeze_backbone) or bool(config["training"].get("train_backbone", False))
         self.loaders = build_cifar10_splits(
             data_dir=config["data"]["data_dir"],
             batch_size=config["data"]["batch_size"],
@@ -452,14 +497,30 @@ class FlowCircuitTrainer:
         )
         self.checkpoint_dir = Path(config["logging"]["checkpoint_dir"])
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        train_params = list(self.components.tokenizer.parameters())
-        train_params += list(self.components.encoder.parameters())
-        train_params += list(self.components.objective.parameters())
-        self.optimizer = AdamW(
-            train_params,
-            lr=config["training"].get("lr", 1.0e-3),
-            weight_decay=config["training"].get("weight_decay", 1.0e-4),
-        )
+        base_lr = config["training"].get("lr", 1.0e-3)
+        weight_decay = config["training"].get("weight_decay", 1.0e-4)
+        optimizer_groups: list[dict] = [
+            {
+                "params": list(self.components.tokenizer.parameters())
+                + list(self.components.encoder.parameters())
+                + list(self.components.objective.parameters()),
+                "lr": base_lr,
+                "initial_lr": base_lr,
+                "weight_decay": weight_decay,
+            }
+        ]
+        if self.train_backbone:
+            backbone_lr = base_lr * float(config["training"].get("backbone_lr_multiplier", 0.1))
+            optimizer_groups.append(
+                {
+                    "params": list(self.components.observer.model.parameters()),
+                    "lr": backbone_lr,
+                    "initial_lr": backbone_lr,
+                    "weight_decay": weight_decay,
+                }
+            )
+        self.optimizer = AdamW(optimizer_groups)
+        self.classification_criterion = nn.CrossEntropyLoss()
         _pe = config["training"]["phase_epochs"]
         ab_epochs = _pe.get("phase_a", 0) + _pe.get("phase_b", 0)
         self.scheduler = CosineAnnealingLR(self.optimizer, T_max=max(ab_epochs, 1))
@@ -623,20 +684,27 @@ class FlowCircuitTrainer:
         self.components.tokenizer.train(train)
         self.components.encoder.train(train)
         self.components.objective.train(train)
+        self.components.observer.train(train if self.train_backbone else False)
         aggregate = {
             "loss": 0.0,
             "pred_loss": 0.0,
             "rec_loss": 0.0,
             "traj_loss": 0.0,
+            "ce_loss": 0.0,
             "prediction_cosine": 0.0,
             "reconstruction_cosine": 0.0,
         }
         n_batches = 0
-        for images, _, _ in loader:
+        ce_weight = float(self.config["training"].get("ce_weight", 0.0))
+        grad_params = list(self.components.tokenizer.parameters()) + list(self.components.encoder.parameters()) + list(self.components.objective.parameters())
+        if self.train_backbone:
+            grad_params += list(self.components.observer.model.parameters())
+        for images, labels, _ in loader:
             images = images.to(self.device)
+            labels = labels.to(self.device)
             if train:
                 self.optimizer.zero_grad()
-            tokenized, _, objective_output = _forward_pass(
+            tokenized, _, objective_output, logits = _forward_pass(
                 self.components,
                 images,
                 lambda_rec=lambda_rec,
@@ -645,20 +713,21 @@ class FlowCircuitTrainer:
                 traj_gamma=self.config["objectives"].get("traj_gamma", 0.2),
                 traj_tau=self.config["objectives"].get("traj_tau", 0.1),
             )
+            ce_loss = self.classification_criterion(logits, labels) if ce_weight > 0.0 else torch.zeros((), device=self.device)
+            total_loss = objective_output.total_loss + (ce_weight * ce_loss)
             if train:
-                objective_output.total_loss.backward()
+                total_loss.backward()
                 nn.utils.clip_grad_norm_(
-                    list(self.components.tokenizer.parameters())
-                    + list(self.components.encoder.parameters())
-                    + list(self.components.objective.parameters()),
+                    grad_params,
                     max_norm=self.config["training"].get("grad_clip", 1.0),
                 )
                 self.optimizer.step()
 
-            aggregate["loss"] += float(objective_output.total_loss.item())
+            aggregate["loss"] += float(total_loss.item())
             aggregate["pred_loss"] += float(objective_output.pred_loss.item())
             aggregate["rec_loss"] += float(objective_output.rec_loss.item())
             aggregate["traj_loss"] += float(objective_output.traj_loss.item())
+            aggregate["ce_loss"] += float(ce_loss.item())
             aggregate["prediction_cosine"] += float(objective_output.prediction_cosine.item())
             aggregate["reconstruction_cosine"] += float(objective_output.reconstruction_cosine.item())
             n_batches += 1
@@ -922,6 +991,7 @@ class FlowCircuitTrainer:
         self.scheduler.load_state_dict(checkpoint["scheduler_state"])
         observer_metadata = checkpoint.get("observer_metadata", {})
         self.components.observer.classifier_is_trained = bool(observer_metadata.get("classifier_is_trained", False))
+        self.components.observer.freeze_backbone = bool(observer_metadata.get("freeze_backbone", self.components.observer.freeze_backbone))
         self.resume_checkpoint = checkpoint
 
     def _save_checkpoint(
@@ -932,23 +1002,16 @@ class FlowCircuitTrainer:
         validation: dict,
         extra_summary: dict | None = None,
     ) -> None:
-        checkpoint = {
-            "version": 1,
-            "phase": phase,
-            "config": self.config,
-            "observer_state": self.components.observer.state_dict(),
-            "observer_metadata": {
-                "classifier_is_trained": bool(self.components.observer.classifier_is_trained),
-            },
-            "tokenizer_state": self.components.tokenizer.state_dict(),
-            "encoder_state": self.components.encoder.state_dict(),
-            "objective_state": self.components.objective.state_dict(),
-            "optimizer_state": self.optimizer.state_dict(),
-            "scheduler_state": self.scheduler.state_dict(),
-            "validation": validation,
-            "summary": extra_summary or {},
-        }
-        torch.save(checkpoint, self.checkpoint_dir / name)
+        save_flow_checkpoint(
+            path=self.checkpoint_dir / name,
+            components=self.components,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            config=self.config,
+            phase=phase,
+            validation=validation,
+            extra_summary=extra_summary,
+        )
 
 
 def _log(msg: str = "") -> None:
@@ -986,7 +1049,8 @@ def _forward_pass(
         traj_gamma=traj_gamma,
         traj_tau=traj_tau,
     )
-    return tokenized, z, output
+    logits = observations.logits if observations.logits is not None else components.observer.model(images)
+    return tokenized, z, output, logits
 
 
 def _predict_next_from_latents(

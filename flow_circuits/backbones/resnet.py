@@ -23,6 +23,7 @@ class ResNetObservations:
     layer_channels: list[int]
     layer_names: list[str]
     grid_size: int
+    logits: torch.Tensor | None = None
 
     @property
     def n_layers(self) -> int:
@@ -40,6 +41,7 @@ class FrozenResNetObserver(nn.Module):
         grid_size: int = 4,
         weights_path: str | None = None,
         require_trained_checkpoint: bool = False,
+        freeze_backbone: bool = True,
     ) -> None:
         super().__init__()
         if arch not in {"resnet18", "resnet34", "resnet50"}:
@@ -49,6 +51,7 @@ class FrozenResNetObserver(nn.Module):
         self.grid_size = grid_size
         self.weights_path = weights_path
         self.require_trained_checkpoint = require_trained_checkpoint
+        self.freeze_backbone = bool(freeze_backbone)
         self.classifier_is_trained = False
         self.model, self.blocks, self.flow_modules, self.layer_names = self._build_model(
             arch=arch,
@@ -58,11 +61,14 @@ class FrozenResNetObserver(nn.Module):
             require_trained_checkpoint=require_trained_checkpoint,
         )
         self.layer_channels = [self._block_out_channels(block) for block in self.blocks]
-        self.requires_grad_(False)
-        self.eval()
+        if self.freeze_backbone:
+            self.requires_grad_(False)
+            self.eval()
 
     def train(self, mode: bool = True):
-        return super().train(False)
+        if self.freeze_backbone:
+            return super().train(False)
+        return super().train(mode)
 
     def observe(self, x: torch.Tensor) -> ResNetObservations:
         states: list[torch.Tensor] = []
@@ -72,13 +78,13 @@ class FrozenResNetObserver(nn.Module):
         def make_state_hook():
             def hook(module, inputs, output):
                 tensor = output[0] if isinstance(output, (tuple, list)) else output
-                states.append(tensor.detach())
+                states.append(tensor.detach() if self.freeze_backbone else tensor)
             return hook
 
         def make_flow_hook():
             def hook(module, inputs, output):
                 tensor = output[0] if isinstance(output, (tuple, list)) else output
-                residuals.append(tensor.detach())
+                residuals.append(tensor.detach() if self.freeze_backbone else tensor)
             return hook
 
         for block in self.blocks:
@@ -86,8 +92,11 @@ class FrozenResNetObserver(nn.Module):
         for module in self.flow_modules:
             handles.append(module.register_forward_hook(make_flow_hook()))
 
-        with torch.no_grad():
-            self.model(x)
+        if self.freeze_backbone:
+            with torch.no_grad():
+                logits = self.model(x)
+        else:
+            logits = self.model(x)
 
         for handle in handles:
             handle.remove()
@@ -98,6 +107,7 @@ class FrozenResNetObserver(nn.Module):
             layer_channels=self.layer_channels,
             layer_names=self.layer_names,
             grid_size=self.grid_size,
+            logits=logits.detach() if self.freeze_backbone else logits,
         )
 
     def forward(self, x: torch.Tensor) -> ResNetObservations:

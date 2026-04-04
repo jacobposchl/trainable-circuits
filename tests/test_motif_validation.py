@@ -71,6 +71,54 @@ def test_discover_motif_families_retains_multilayer_family_without_depth_path(mo
     assert motif["thresholds"]
 
 
+def test_discover_motif_families_can_scan_all_nodes_without_q_panel(monkeypatch):
+    z = torch.nn.functional.normalize(torch.randn(6, 2, 2, 4), dim=-1)
+    outputs = {
+        "z": z,
+        "local_features": [torch.zeros(6, 2, 5) for _ in range(2)],
+        "future_descriptors": z.clone(),
+        "labels": torch.tensor([0, 0, 1, 1, 2, 2]),
+        "indices": torch.arange(6),
+    }
+    monkeypatch.setattr(
+        "flow_circuits.evaluation.motif_validation.collect_probe_outputs",
+        lambda *args, **kwargs: outputs,
+    )
+    captured = {}
+
+    def fake_discover(descriptor_grid, dataset_indices, **kwargs):
+        captured["node_subset"] = kwargs["node_subset"]
+        return []
+
+    monkeypatch.setattr("flow_circuits.evaluation.motif_validation.discover_node_clusters", fake_discover)
+    components = SimpleNamespace(
+        config={
+            "data": {"seed": 0},
+            "tokenization": {"grid_size": 2},
+            "discovery": {
+                "min_cluster_fraction": 0.2,
+                "max_cluster_fraction": 0.8,
+                "min_cluster_size": 2,
+                "stability_threshold": 0.0,
+            },
+        }
+    )
+
+    artifact = discover_motif_families(
+        components,
+        loader=object(),
+        device=torch.device("cpu"),
+        checkpoint_tag="joint",
+        max_images=6,
+        nodes_per_layer=1,
+        bootstrap_iterations=1,
+        use_all_nodes=True,
+    )
+
+    assert artifact["metadata"]["selected_node_panel_strategy"] == "all_nodes"
+    assert sorted(map(tuple, captured["node_subset"])) == [(0, 0), (0, 1), (1, 0), (1, 1)]
+
+
 def test_motif_gallery_ranking_is_deterministic(monkeypatch):
     z = torch.randn(6, 2, 2, 4)
     z = torch.nn.functional.normalize(z, dim=-1)

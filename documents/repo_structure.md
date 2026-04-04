@@ -36,6 +36,7 @@ This repository is organized around the `flow_circuits/` package and the current
 |---|---|
 | `baselines.py` | Fits and evaluates node-wise mean, local-MLP, and flow-MLP baselines used for P1 comparison and Phase C gating. |
 | `trainer.py` | `FlowCircuitTrainer`, checkpoint loading, staged training, validation metric collection, and artifact-oriented output assembly. |
+| `branch_workflows.py` | Notebook-facing workflow helpers for supervised backbone training, frozen/joint `z` branch training, and milestone Phase C checkpoint sweeps. |
 
 ### `flow_circuits/discovery/`
 
@@ -48,8 +49,9 @@ This repository is organized around the `flow_circuits/` package and the current
 | File | Purpose |
 |---|---|
 | `metrics.py` | Confirmatory/descriptive representation metrics, including one-step prediction summaries, same-split baseline comparisons, bootstrap confidence intervals, and external trajectory alignment against raw pooled-state and raw flow baselines. |
-| `efficient_validation.py` | Fast Phase B vs Phase C validation experiments used by `nb02`. |
-| `motif_validation.py` | Recurring motif-family discovery plus core and extended motif analyses used by `nb03` and `nb04`. |
+| `q_validation.py` | Candidate checkpoint ranking and downstream checkpoint selection using the only notebook-stage `q` validation pass. |
+| `motif_validation.py` | `z`-space motif-family discovery plus motif analyses used by the motif notebook workflow. |
+| `motif_utility.py` | Motif-based clean and corruption utility experiments used by the final notebook. |
 
 ### `flow_circuits/interventions/`
 
@@ -104,10 +106,10 @@ logging
 
 The supported notebook suite is:
 
-- `nb01_training_and_representation_metrics.ipynb`
-- `nb02_efficient_representation_and_circuit_validation.ipynb`
-- `nb03_recurring_motif_core_validation.ipynb`
-- `nb04_motif_extended_characterization.ipynb`
+- `nb01_backbone_and_z_training.ipynb`
+- `nb02_q_validation.ipynb`
+- `nb03_z_motif_discovery_and_analysis.ipynb`
+- `nb04_motif_utility_and_robustness.ipynb`
 
 Each notebook uses the current `flow_circuits` package and/or the `flow-*` CLIs only.
 

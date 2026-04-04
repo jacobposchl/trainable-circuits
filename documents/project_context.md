@@ -701,10 +701,10 @@ The repository implements the experimental workflow with four CLI stages:
 
 The first-class notebook suite mirrors these stages:
 
-- `notebooks/nb01_training_and_representation_metrics.ipynb`
-- `notebooks/nb02_efficient_representation_and_circuit_validation.ipynb`
-- `notebooks/nb03_recurring_motif_core_validation.ipynb`
-- `notebooks/nb04_motif_extended_characterization.ipynb`
+- `notebooks/nb01_backbone_and_z_training.ipynb`
+- `notebooks/nb02_q_validation.ipynb`
+- `notebooks/nb03_z_motif_discovery_and_analysis.ipynb`
+- `notebooks/nb04_motif_utility_and_robustness.ipynb`
 
 The standard artifact flow is:
 

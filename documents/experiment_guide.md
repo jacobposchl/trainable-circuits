@@ -1,6 +1,6 @@
 # Experiment Guide
 
-This guide explains how to run the current flow-circuits workflow end to end and how the generated artifacts connect to the notebooks and evaluation criteria.
+This guide explains the current four-notebook workflow for training, validating, discovering, and testing `z`-space motif flows in `flow-circuits`.
 
 Related references:
 
@@ -11,24 +11,21 @@ Related references:
 
 ## Workflow Overview
 
-The supported workflow is:
+The supported workflow is still grounded in:
 
 1. `flow-train`
 2. `flow-evaluate`
 3. `flow-discover`
 4. `flow-intervene`
 
-These stages map onto the current notebook suite:
+But the canonical notebook story is now:
 
-- `nb01_training_and_representation_metrics.ipynb`
-- `nb02_efficient_representation_and_circuit_validation.ipynb`
-- `nb03_recurring_motif_core_validation.ipynb`
-- `nb04_motif_extended_characterization.ipynb`
-- `nb05_motif_visual_interpretability_and_probe_analysis.ipynb`
-- `nb06_hard_pair_correction_from_z.ipynb`
-- `nb07_phase_c_corruption_selective_correction.ipynb`
+- `nb01_backbone_and_z_training.ipynb`
+- `nb02_q_validation.ipynb`
+- `nb03_z_motif_discovery_and_analysis.ipynb`
+- `nb04_motif_utility_and_robustness.ipynb`
 
-Each notebook is designed for Google Colab. The setup cell:
+Each notebook is Google Colab-first. The setup cell:
 
 - clones or updates `https://github.com/jacobposchl/model-interpretability.git`
 - installs the repo in editable mode inside the Colab runtime
@@ -44,230 +41,138 @@ All current configs assume CIFAR-10 with a deterministic split:
 - `5k` discovery images
 - `10k` test images
 
-Labels are not used during representation learning or candidate-circuit discovery. They are used only for descriptive analysis, class-matched intervention controls, and optional secondary reporting.
+Labels are not used during representation learning or clean motif discovery. They are used only for descriptive analysis, motif utility ranking, hard-example selection, and corruption reporting.
 
-## Training Modes
+## Training Workflow
 
-There are two supported training modes:
+The notebook-first workflow now trains two `z` branches after the supervised backbone is available:
 
-Before either mode is run, set `backbone.weights_path` in the chosen config to a supervised CIFAR-10 checkpoint for the frozen ResNet backbone. Canonical configs now fail loudly if that checkpoint is not provided.
+- a canonical **frozen-backbone** branch
+- an experimental **joint-backbone** branch
 
-### Base
+Notebook 1 is responsible for:
 
-- Phase A: `L_pred`
-- Phase B: `L_pred + L_rec`
-- Final checkpoint defaults to the accepted Phase B model
+- training or reusing the supervised backbone checkpoint
+- training the frozen branch through Phase A and Phase B
+- warm-starting the joint branch from the frozen Phase B checkpoint
+- running one Phase C continuation per `lambda_traj` candidate and saving only milestone checkpoints for later selection
 
-Use:
+This is intentionally compute efficient:
 
-```bash
-flow-train --config configs/flow/resnet18_base.yaml
-```
-
-### Aligned
-
-- Phase A: `L_pred`
-- Phase B: `L_pred + L_rec`
-- Phase C: optional `L_traj`, enabled only after the Phase B baseline gate is passed
-- The canonical aligned config now evaluates one Phase C lambda candidate for 20 epochs and always saves the resulting `phase_c.pt` checkpoint for downstream comparison
-
-Phase C is retained only if external trajectory alignment improves and one-step prediction remains within the Phase B acceptance window.
-
-Use:
-
-```bash
-flow-train --config configs/flow/resnet18_aligned.yaml
-```
+- one Phase C continuation per lambda candidate
+- milestone checkpoints only
+- no retraining to compare epoch counts
+- no joint branch training from scratch
 
 ## Artifact Flow
 
-### 1. Training Checkpoints
+### 1. Notebook 1 Training Artifacts
 
-`flow-train` writes versioned `.pt` checkpoints containing:
+Notebook 1 writes notebook-managed checkpoint artifacts such as:
 
-- config
-- accepted training phase
-- observer/tokenizer/encoder/objective state
-- optimizer and scheduler state
-- validation summaries
+- `backbone_supervised.pt`
+- `phase_b_frozen.pt`
+- `phase_c_frozen_lambda_<x>_epoch_<y>.pt`
+- `phase_c_joint_lambda_<x>_epoch_<y>.pt`
+- `training_candidates.json`
 
-Important outputs:
+Notebook 1 does not pick the final downstream checkpoints. Notebook 2 performs that selection.
 
-- `phase_b.pt`
-- `phase_c.pt`
-- `final.pt`
+### 2. Notebook 2 Selection Artifact
 
-`phase_b.pt` is the predictive anchor checkpoint.
-`phase_c.pt` is always kept as the trajectory-aligned exploratory checkpoint.
-`final.pt` remains the accepted model checkpoint after the Phase C selection rule is applied.
+Notebook 2 writes:
 
-If an aligned run is interrupted after Phase B has already been saved, you can resume from that checkpoint instead of retraining Phase A+B:
+- a ranking summary over frozen and joint checkpoint candidates
+- `selected_checkpoints.json`
 
-```bash
-flow-train --config configs/flow/resnet18_aligned.yaml --resume experiments/flow/resnet18_aligned/phase_b.pt
-```
+This is the only notebook that uses `q` directly. All later notebooks should be `z`-only.
 
-### 2. Evaluation Summary
+### 3. Notebook 3 Motif Artifacts
 
-`flow-evaluate` writes a JSON summary containing:
+Notebook 3 writes clean motif artifacts for the chosen frozen and joint checkpoints:
 
-- representation metrics
-- baseline comparison
-- confirmatory checks with bootstrap confidence intervals
-- evaluation null checks
+- `frozen_clean_motifs.json`
+- `joint_clean_motifs.json`
+- motif analysis summaries and rendering metadata
 
-Use:
+These artifacts are intended to be reused in notebook 4 instead of rediscovering clean motifs.
 
-```bash
-flow-evaluate --checkpoint experiments/flow/resnet18_base/final.pt
-```
+### 4. Notebook 4 Utility Artifacts
 
-This stage supports the P1/P2-facing checks described in `project_context.md`.
+Notebook 4 writes:
 
-### 3. Candidate-Circuit Artifact
+- clean hard-example motif utility summaries
+- corruption utility summaries
+- selected top-motif subset summaries
+- case-study-ready metadata
 
-`flow-discover` writes a JSON artifact containing:
-
-- discovery metadata
-- retained node clusters
-- candidate circuits
-- centroids
-- thresholds
-- multi-seed stability statistics
-- discovery null-check summaries
-
-Use:
-
-```bash
-flow-discover --checkpoint experiments/flow/resnet18_base/final.pt
-```
-
-This remains the advanced exhaustive discovery path. The unified Notebook 2 now uses a smaller pilot-discovery workflow implemented through package APIs instead of calling `flow-discover`.
-
-### 4. Intervention Summary
-
-`flow-intervene` writes:
-
-- intervention JSON
-- intervention CSV
-
-Use:
-
-```bash
-flow-intervene \
-  --checkpoint experiments/flow/resnet18_base/final.pt \
-  --circuits experiments/flow/resnet18_base/candidate_circuits.json
-```
-
-This remains the advanced exhaustive intervention path. The unified Notebook 2 now uses a top-k pilot intervention workflow implemented through package APIs instead of calling `flow-intervene`.
+By default it transfers clean motifs to corrupted inputs before considering any corruption-specific rediscovery.
 
 ## Notebook Roles
 
-### Notebook 1: Training and Representation Metrics
+### Notebook 1: Backbone and `z` Training
 
 Use this notebook to:
 
-- choose a Base or Aligned config
-- train a quick or full run
-- inspect evaluation summaries
-- compare the model against baselines
-- inspect a compact qualitative view of token-level outputs
+- train or reload the supervised backbone
+- train the frozen `z` branch
+- warm-start and train the joint `z` branch
+- save milestone Phase C checkpoints without retraining per epoch comparison
 
-### Notebook 2: Efficient Representation and Circuit Validation
-
-Use this notebook to:
-
-- load `phase_b.pt` and `phase_c.pt`
-- run fast side-by-side validation experiments without retraining
-- compare neighbor agreement, activation decoding, pilot discovery, and top-k interventions
-- reuse notebook-local cached experiment outputs across Colab sessions
-- decide whether Phase C is promising enough to justify the exhaustive CLI workflow
-
-### Notebook 3: Recurring Motif Core Validation
+### Notebook 2: `q` Validation
 
 Use this notebook to:
 
-- discover recurring motif families directly in `z`
-- compare motif galleries, persistence, predictiveness, and interventions for `phase_b.pt` vs `phase_c.pt`
-- reuse notebook-local motif artifacts instead of re-running exhaustive circuit discovery
-- answer the main “does alignment create better recurring multi-layer motifs?” question
+- load the saved frozen and joint milestone checkpoints
+- score them against `q`-alignment / future-structure metrics
+- choose one downstream checkpoint per branch
+- keep all later notebooks `z`-only
 
-### Notebook 4: Motif Extended Characterization
-
-Use this notebook to:
-
-- inspect motif co-occurrence structure within each checkpoint
-- match Phase B motifs to Phase C motifs
-- characterize motif topology as spatial, depth-like, or fragmented
-- test whether motifs remain similar across overlapping rediscovery subsets
-
-`nb04` requires cached motif-family artifacts from `nb03` and will error if they are missing.
-
-### Notebook 5: Motif Visual Interpretability and Probe Analysis
+### Notebook 3: `z` Motif Discovery and Analysis
 
 Use this notebook to:
 
-- inspect motif and node-cluster exemplar grids directly on CIFAR-10 images
-- compare matched Phase B vs Phase C motifs visually
-- review intervention case studies
-- measure what class/error/confusion information is linearly decodable from `z`
+- discover motif families directly in `z`
+- cache clean motif artifacts once for the frozen and joint branches
+- analyze multi-layer support, persistence, purity, and topology
+- prepare transfer-ready motif artifacts for notebook 4
 
-### Notebook 6: Hard-Pair Correction from z
-
-Use this notebook to:
-
-- audit multiclass linear decodability from `z`
-- benchmark full-`z` and top-node probes on the backbone's hardest validation-selected confusion pairs
-- test whether pairwise `z` probes improve the frozen backbone when used as top-2 tie-breakers
-- inspect corrected and harmed examples with top-node overlays
-
-### Notebook 7: Phase-C Corruption Selective Correction
+### Notebook 4: Motif Utility and Robustness
 
 Use this notebook to:
 
-- stress-test `phase_c.pt` on a deterministic CIFAR-10 corruption suite
-- compare backbone, backbone + full-`z`, and backbone + top-node-subset selective correction in the same experiment cells
-- inspect whether `z` becomes more useful as corruption severity increases
-- sweep the size of the top-node subset to test whether useful signal is concentrated or distributed
+- test motif-based hybrids instead of raw-node hybrids
+- compare backbone, full-motif, and top-motif correction for the frozen and joint branches
+- evaluate clean hard-example utility
+- evaluate corruption robustness with transferred clean motifs
 
 ## Interpreting Outputs
 
-### Confirmatory Analyses
+Primary success signals now come from three linked checks:
 
-Treat these as the main checks:
+1. `q` validation:
+   - does `z` preserve future-flow structure well enough to justify downstream use?
+2. motif quality:
+   - are the discovered `z` motifs stable, multi-layer, and interpretable?
+3. motif utility:
+   - do those same motifs improve decisions on hard or corrupted inputs?
 
-- one-step prediction against non-contextual baselines
-- latent geometry alignment to external future similarity
-- candidate-circuit stability
-- held-out causal specificity
+The intended optimization target is not raw clean CIFAR-10 accuracy alone. The stronger target is:
 
-The evaluation and discovery artifacts now include the confirmatory/statistical summaries needed to support these checks directly.
-
-### Descriptive Analyses
-
-Treat these as characterization, not gatekeeping:
-
-- reconstruction fidelity
-- multi-step prediction decay
-- active-node coverage
-- post hoc class purity
-- transfer experiments
+- future-structured `z`
+- better multi-layer motif families
+- useful motif-based correction under stress
 
 ## Recommended Run Order
 
-1. Train `resnet18_base`
-2. Evaluate the resulting `final.pt`
-3. Train `resnet18_aligned` and keep both `phase_b.pt` and `phase_c.pt`
-4. Run `nb02_efficient_representation_and_circuit_validation.ipynb`
-5. Run `nb03_recurring_motif_core_validation.ipynb`
-6. Run `nb04_motif_extended_characterization.ipynb` if you want the broader motif diagnostics
-7. Run `nb05_motif_visual_interpretability_and_probe_analysis.ipynb` to inspect motifs and probe-readable semantics directly
-8. Run `nb06_hard_pair_correction_from_z.ipynb` if you want a Phase-C-only selective-correction readout for hard examples, confidence quality, and actionable hard-pair support from `z`
-9. Run `nb07_phase_c_corruption_selective_correction.ipynb` if you want to test whether the same Phase-C correction signal becomes more useful under corruption stress
-10. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the aligned representation is promising
+1. Run `nb01_backbone_and_z_training.ipynb`
+2. Run `nb02_q_validation.ipynb`
+3. Run `nb03_z_motif_discovery_and_analysis.ipynb`
+4. Run `nb04_motif_utility_and_robustness.ipynb`
+5. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the chosen branch is promising
 
 ## Operational Notes
 
-- The repo only supports the `flow_circuits` package and `flow-*` CLIs.
-- The notebooks are analysis surfaces, not alternative implementations.
-- If you change configs for a quick notebook run, keep checkpoint and artifact outputs inside a notebook-specific output directory so they do not overwrite your main experiment artifacts.
+- The repo still supports the `flow_circuits` package and `flow-*` CLIs.
+- The notebooks should remain thin orchestration surfaces over package APIs.
+- If you change checkpoint shapes, notebook artifact layouts, or motif utility logic, update docs and tests together.

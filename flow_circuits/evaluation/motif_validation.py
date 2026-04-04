@@ -61,6 +61,8 @@ def discover_motif_families(
     stability_threshold: float | None = None,
     random_seed: int | None = None,
     node_panel: list[list[int]] | list[tuple[int, int]] | None = None,
+    use_all_nodes: bool = False,
+    checkpoint_path: str | None = None,
     output_path: str | Path | None = None,
     progress_callback=None,
 ) -> dict:
@@ -111,6 +113,8 @@ def discover_motif_families(
         ),
         random_seed=int(random_seed if random_seed is not None else components.config["data"].get("seed", 0)),
         node_panel=node_panel,
+        use_all_nodes=use_all_nodes,
+        checkpoint_path=checkpoint_path,
         tracker=tracker,
     )
     _maybe_write_json(result, output_path)
@@ -669,6 +673,8 @@ def run_motif_transfer_stability_experiment(
         stability_threshold=float(components.config.get("discovery", {}).get("stability_threshold", 0.60)),
         random_seed=seed,
         node_panel=shared_panel,
+        use_all_nodes=False,
+        checkpoint_path=None,
         tracker=tracker,
     )
     right_artifact = _discover_motif_families_from_outputs(
@@ -685,6 +691,8 @@ def run_motif_transfer_stability_experiment(
         stability_threshold=float(components.config.get("discovery", {}).get("stability_threshold", 0.60)),
         random_seed=seed + 1,
         node_panel=shared_panel,
+        use_all_nodes=False,
+        checkpoint_path=None,
         tracker=tracker,
     )
     matched_pairs = _greedy_match_motifs(left_artifact.get("motifs", []), right_artifact.get("motifs", []))
@@ -760,9 +768,15 @@ def _discover_motif_families_from_outputs(
     stability_threshold: float,
     random_seed: int,
     node_panel: list[list[int]] | list[tuple[int, int]] | None,
+    use_all_nodes: bool,
+    checkpoint_path: str | None,
     tracker: _ProgressTracker,
 ) -> dict:
-    if node_panel is None:
+    if use_all_nodes:
+        n_layers = int(outputs["z"].shape[1])
+        n_cells = int(outputs["z"].shape[2])
+        node_panel = [[layer_idx, cell_idx] for layer_idx in range(n_layers) for cell_idx in range(n_cells)]
+    elif node_panel is None:
         node_panel = _select_q_dispersion_node_panel(
             outputs["future_descriptors"],
             nodes_per_layer=nodes_per_layer,
@@ -800,10 +814,12 @@ def _discover_motif_families_from_outputs(
             "n_cells": int(outputs["z"].shape[2]),
             "grid_size": int(grid_size),
             "random_seed": int(random_seed),
+            "checkpoint_path": checkpoint_path,
             "discovery_space": "z",
             "merge_threshold": float(merge_threshold),
             "node_threshold": float(node_threshold),
             "bootstrap_iterations": int(bootstrap_iterations),
+            "selected_node_panel_strategy": "all_nodes" if use_all_nodes else "q_dispersion",
         },
         "selected_node_panel": normalized_node_panel,
         "node_clusters": node_clusters,

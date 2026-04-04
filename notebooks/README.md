@@ -4,13 +4,10 @@ The notebooks in this repo are analysis and orchestration surfaces, not the prim
 
 ## Current Suite
 
-- `nb01_training_and_representation_metrics.ipynb`
-- `nb02_efficient_representation_and_circuit_validation.ipynb`
-- `nb03_recurring_motif_core_validation.ipynb`
-- `nb04_motif_extended_characterization.ipynb`
-- `nb05_motif_visual_interpretability_and_probe_analysis.ipynb`
-- `nb06_hard_pair_correction_from_z.ipynb`
-- `nb07_phase_c_corruption_selective_correction.ipynb`
+- `nb01_backbone_and_z_training.ipynb`
+- `nb02_q_validation.ipynb`
+- `nb03_z_motif_discovery_and_analysis.ipynb`
+- `nb04_motif_utility_and_robustness.ipynb`
 
 ## Intended Role
 
@@ -24,13 +21,10 @@ Each notebook should:
 
 Current notebook roles:
 
-- `nb01`: training, evaluation, and representation-metric inspection
-- `nb02`: efficient Phase B vs Phase C validation across neighbor agreement, activation probes, pilot discovery, and top-k interventions
-- `nb03`: recurring motif discovery and the most decision-driving motif validation experiments
-- `nb04`: extended motif characterization, Phase B vs Phase C motif matching, and motif transfer/topology analysis
-- `nb05`: image-first motif interpretation, intervention case studies, and linear-probe semantics/error/confusion analysis
-- `nb06`: Phase-C-only selective correction, confidence, and hard-example auditing from `z`
-- `nb07`: Phase-C-only corruption stress testing with backbone, full-`z`, and top-node-subset selective correction
+- `nb01`: supervised backbone training plus frozen/joint `z` branch training with milestone Phase C checkpoints
+- `nb02`: the only `q` notebook; ranks frozen and joint checkpoints and selects the downstream pair
+- `nb03`: `z`-only motif discovery and motif-family analysis on clean data
+- `nb04`: motif-based prediction utility on clean hard examples and corrupted inputs
 
 Each notebook should not:
 

@@ -1,4 +1,8 @@
 from flow_circuits.training.baselines import BaselineRegressors
+from flow_circuits.training.branch_workflows import (
+    load_yaml_config,
+    run_backbone_and_z_training_workflow,
+)
 from flow_circuits.training.trainer import (
     FlowCircuitTrainer,
     LoadedFlowComponents,
@@ -10,6 +14,7 @@ from flow_circuits.training.trainer import (
     collect_model_outputs,
     collect_probe_outputs,
     load_components_from_checkpoint,
+    save_flow_checkpoint,
 )
 
 __all__ = [
@@ -23,5 +28,8 @@ __all__ = [
     "collect_intervention_outputs",
     "collect_model_outputs",
     "collect_probe_outputs",
+    "load_yaml_config",
     "load_components_from_checkpoint",
+    "run_backbone_and_z_training_workflow",
+    "save_flow_checkpoint",
 ]
