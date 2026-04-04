@@ -10,6 +10,8 @@ NOTEBOOK_DIR = REPO_ROOT / "notebooks"
 EXPECTED_NOTEBOOKS = {
     "nb01_training_and_representation_metrics.ipynb",
     "nb02_efficient_representation_and_circuit_validation.ipynb",
+    "nb03_recurring_motif_core_validation.ipynb",
+    "nb04_motif_extended_characterization.ipynb",
 }
 LEGACY_NOTEBOOKS = {
     "nb01_training_and_validation.ipynb",
@@ -75,6 +77,25 @@ def test_notebooks_have_expected_structure_and_compilable_code_cells():
             "OUTPUT_DIR",
             "FORCE_RERUN",
         },
+        "nb03_recurring_motif_core_validation.ipynb": {
+            "RUN_MODE",
+            "CONFIG_NAME",
+            "EXPERIMENTS",
+            "PHASE_B_CHECKPOINT",
+            "PHASE_C_CHECKPOINT",
+            "OUTPUT_DIR",
+            "FORCE_RERUN",
+        },
+        "nb04_motif_extended_characterization.ipynb": {
+            "RUN_MODE",
+            "CONFIG_NAME",
+            "EXPERIMENTS",
+            "PHASE_B_CHECKPOINT",
+            "PHASE_C_CHECKPOINT",
+            "NB03_OUTPUT_DIR",
+            "OUTPUT_DIR",
+            "FORCE_RERUN",
+        },
     }
     for notebook_name in EXPECTED_NOTEBOOKS:
         path = NOTEBOOK_DIR / notebook_name
@@ -134,6 +155,36 @@ def test_nb02_requires_both_checkpoints_and_never_retrains():
     assert "flow-intervene" not in all_code
 
 
+def test_nb03_requires_both_checkpoints_and_uses_motif_package_apis():
+    data = json.loads((NOTEBOOK_DIR / "nb03_recurring_motif_core_validation.ipynb").read_text(encoding="utf-8"))
+    all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
+
+    assert "phase_b.pt" in all_code
+    assert "phase_c.pt" in all_code
+    assert "Missing required checkpoint" in all_code
+    assert "discover_motif_families" in all_code
+    assert "run_motif_gallery_experiment" in all_code
+    assert "run_motif_persistence_experiment" in all_code
+    assert "run_motif_predictiveness_experiment" in all_code
+    assert "run_motif_intervention_experiment" in all_code
+    assert "flow-train" not in all_code
+
+
+def test_nb04_requires_nb03_artifacts_and_never_retrains():
+    data = json.loads((NOTEBOOK_DIR / "nb04_motif_extended_characterization.ipynb").read_text(encoding="utf-8"))
+    all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
+
+    assert "phase_b.pt" in all_code
+    assert "phase_c.pt" in all_code
+    assert "Missing required motif artifact from nb03" in all_code
+    assert "run_motif_cooccurrence_experiment" in all_code
+    assert "run_motif_phase_match_experiment" in all_code
+    assert "run_motif_topology_experiment" in all_code
+    assert "run_motif_transfer_stability_experiment" in all_code
+    assert "discover_motif_families" not in all_code
+    assert "flow-train" not in all_code
+
+
 def test_nb02_exposes_exact_experiment_selector_and_cache_controls():
     data = json.loads((NOTEBOOK_DIR / "nb02_efficient_representation_and_circuit_validation.ipynb").read_text(encoding="utf-8"))
     config_source = "".join(data["cells"][4]["source"])
@@ -151,6 +202,45 @@ def test_nb02_exposes_exact_experiment_selector_and_cache_controls():
     assert "FORCE_RERUN = False" in config_source
     assert "nb02_efficient_validation" in all_code
     assert "_cache_path" in helper_source
+
+
+def test_nb03_and_nb04_expose_exact_experiment_selectors_and_cache_controls():
+    expectations = {
+        "nb03_recurring_motif_core_validation.ipynb": (
+            "CORE_MOTIF_EXPERIMENT_IDS",
+            "nb03_recurring_motif_core_validation",
+            (
+                "motif_families",
+                "motif_galleries",
+                "motif_persistence",
+                "motif_predictiveness",
+                "motif_interventions",
+            ),
+        ),
+        "nb04_motif_extended_characterization.ipynb": (
+            "EXTENDED_MOTIF_EXPERIMENT_IDS",
+            "nb04_motif_extended_characterization",
+            (
+                "motif_cooccurrence_graph",
+                "motif_phase_match",
+                "motif_topology",
+                "motif_transfer_stability",
+            ),
+        ),
+    }
+    for notebook_name, (experiment_constant, output_dir_name, experiment_ids) in expectations.items():
+        data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
+        config_source = "".join(data["cells"][4]["source"])
+        helper_source = "".join(data["cells"][5]["source"])
+        all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
+
+        assert 'EXPERIMENTS = "all"' in config_source
+        assert "FORCE_RERUN = False" in config_source
+        assert experiment_constant in all_code
+        assert output_dir_name in all_code
+        assert "_cache_path" in helper_source
+        for experiment_id in experiment_ids:
+            assert experiment_id in all_code
 
 
 def test_nb02_uses_package_apis_and_progress_callbacks_not_heartbeats():

@@ -114,12 +114,13 @@ def run_circuit_interventions(
     test_outputs: dict[str, torch.Tensor],
     *,
     alpha: float = 0.05,
+    descriptor_key: str = "future_descriptors",
     output_path: str | Path | None = None,
     progress_callback=None,
     n_jobs: int = 1,
 ) -> list[InterventionResult]:
     components.observer.require_semantic_logits()
-    future_descriptors = test_outputs["future_descriptors"]
+    descriptors = test_outputs[descriptor_key]
     dataset_indices = test_outputs["indices"]
     labels = test_outputs["labels"]
     logits = test_outputs["logits"]
@@ -130,7 +131,7 @@ def run_circuit_interventions(
     raw_results = []
     total_circuits = len(circuits_artifact["circuits"])
     for circuit_idx, circuit in enumerate(circuits_artifact["circuits"], start=1):
-        member_mask = assign_circuit_members(circuit, future_descriptors, dataset_indices)
+        member_mask = assign_circuit_members(circuit, descriptors, dataset_indices)
         member_rows = torch.nonzero(member_mask, as_tuple=False).flatten()
         if member_rows.numel() == 0:
             if progress_callback is not None:

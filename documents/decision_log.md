@@ -110,3 +110,16 @@ Why:
 
 - makes the confirmatory story inspectable from saved outputs rather than implicit notebook logic
 - reduces the risk of point-estimate over-interpretation
+
+### 10. Motif Notebooks Complement Strict Circuit Discovery
+
+Decision:
+
+- `nb03` and `nb04` analyze recurring multi-layer motifs discovered directly in `z`
+- these motif notebooks complement, but do not replace, the stricter `flow-discover` / `flow-intervene` candidate-circuit workflow
+
+Why:
+
+- current evidence suggests the representation can contain recurring structure even when it does not satisfy the strict connected depth-path circuit definition
+- separating motif characterization from strict candidate-circuit validation keeps the scientific story clearer
+- it gives the notebook suite a faster path to interpretable recurring-structure analysis without changing the first-class CLI artifact contracts

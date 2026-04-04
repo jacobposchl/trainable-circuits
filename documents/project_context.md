@@ -703,6 +703,8 @@ The first-class notebook suite mirrors these stages:
 
 - `notebooks/nb01_training_and_representation_metrics.ipynb`
 - `notebooks/nb02_efficient_representation_and_circuit_validation.ipynb`
+- `notebooks/nb03_recurring_motif_core_validation.ipynb`
+- `notebooks/nb04_motif_extended_characterization.ipynb`
 
 The standard artifact flow is:
 

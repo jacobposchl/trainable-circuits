@@ -6,6 +6,8 @@ The notebooks in this repo are analysis and orchestration surfaces, not the prim
 
 - `nb01_training_and_representation_metrics.ipynb`
 - `nb02_efficient_representation_and_circuit_validation.ipynb`
+- `nb03_recurring_motif_core_validation.ipynb`
+- `nb04_motif_extended_characterization.ipynb`
 
 ## Intended Role
 
@@ -21,6 +23,8 @@ Current notebook roles:
 
 - `nb01`: training, evaluation, and representation-metric inspection
 - `nb02`: efficient Phase B vs Phase C validation across neighbor agreement, activation probes, pilot discovery, and top-k interventions
+- `nb03`: recurring motif discovery and the most decision-driving motif validation experiments
+- `nb04`: extended motif characterization, Phase B vs Phase C motif matching, and motif transfer/topology analysis
 
 Each notebook should not:
 

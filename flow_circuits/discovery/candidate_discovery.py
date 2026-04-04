@@ -4,10 +4,16 @@ from collections import defaultdict, deque
 import json
 from pathlib import Path
 
-import hdbscan
 import numpy as np
-from sklearn.decomposition import PCA
 
+from flow_circuits.discovery.node_clustering import (
+    bootstrap_cluster_stability,
+    cluster_descriptors,
+    cluster_prepared_descriptors,
+    discover_node_clusters,
+    jaccard,
+    prepare_descriptors,
+)
 from flow_circuits.evaluation.metrics import bootstrap_mean_ci
 
 
@@ -100,90 +106,40 @@ class CandidateCircuitDiscoverer:
         progress_callback=None,
         node_subset: list[list[int]] | list[tuple[int, int]] | None = None,
     ) -> list[dict]:
-        n_images, n_layers, n_cells, _ = future_descriptors.shape
-        node_clusters = []
-        n_min = max(self.min_cluster_size, int(np.ceil(self.min_cluster_fraction * n_images)))
-        n_max = int(np.floor(self.max_cluster_fraction * n_images))
-        if node_subset is None:
-            nodes_to_scan = [(layer_idx, cell_idx) for layer_idx in range(n_layers) for cell_idx in range(n_cells)]
-        else:
-            nodes_to_scan = [(int(layer_idx), int(cell_idx)) for layer_idx, cell_idx in node_subset]
-        total_nodes = len(nodes_to_scan)
-        completed_nodes = 0
-        for layer_idx, cell_idx in nodes_to_scan:
-            descriptors = future_descriptors[:, layer_idx, cell_idx, :]
-            prepared_descriptors = self._prepare_descriptors(descriptors)
-            labels = self._cluster_prepared_descriptors(prepared_descriptors)
-            for cluster_id in sorted(set(labels.tolist())):
-                if cluster_id == -1:
-                    continue
-                members = np.flatnonzero(labels == cluster_id)
-                if not (n_min <= members.size <= n_max):
-                    continue
-                stability = self._bootstrap_stability(prepared_descriptors, members)
-                if stability < self.stability_threshold:
-                    continue
-                node_clusters.append(
-                    {
-                        "node": [int(layer_idx), int(cell_idx)],
-                        "image_set": dataset_indices[members].tolist(),
-                        "row_indices": members.tolist(),
-                        "size": int(members.size),
-                        "stability": float(stability),
-                    }
-                )
-            completed_nodes += 1
-            if progress_callback is not None:
-                progress_callback(
-                    stage="node_clustering",
-                    completed=completed_nodes,
-                    total=total_nodes,
-                    layer_idx=int(layer_idx),
-                    cell_idx=int(cell_idx),
-                    n_node_clusters=len(node_clusters),
-                )
-        return node_clusters
+        return discover_node_clusters(
+            future_descriptors,
+            dataset_indices,
+            min_cluster_fraction=self.min_cluster_fraction,
+            max_cluster_fraction=self.max_cluster_fraction,
+            min_cluster_size=self.min_cluster_size,
+            bootstrap_iterations=self.bootstrap_iterations,
+            stability_threshold=self.stability_threshold,
+            random_seed=self.random_seed,
+            progress_callback=progress_callback,
+            node_subset=node_subset,
+        )
 
     def _prepare_descriptors(self, descriptors: np.ndarray) -> np.ndarray:
-        # HDBSCAN is O(n^2) in high dimensions. PCA-reduce to 32 dims first so
-        # tree-based distance algorithms work. The future descriptors are L2-normalized
-        # so PCA followed by re-normalization preserves angular cluster structure.
-        effective = descriptors
-        n_samples, n_dims = descriptors.shape
-        if n_dims > 32 and n_samples > 100:
-            n_components = min(32, n_samples - 1, n_dims)
-            reduced = PCA(n_components=n_components, random_state=self.random_seed).fit_transform(descriptors)
-            norms = np.linalg.norm(reduced, axis=1, keepdims=True)
-            effective = reduced / np.clip(norms, 1e-8, None)
-        return effective
+        return prepare_descriptors(descriptors, random_seed=self.random_seed)
 
     def _cluster_prepared_descriptors(self, descriptors: np.ndarray) -> np.ndarray:
-        clusterer = hdbscan.HDBSCAN(
-            min_cluster_size=max(self.min_cluster_size, 2),
-            min_samples=None,
-            metric="euclidean",
-        )
-        return clusterer.fit_predict(descriptors)
+        return cluster_prepared_descriptors(descriptors, min_cluster_size=self.min_cluster_size)
 
     def _cluster_descriptors(self, descriptors: np.ndarray) -> np.ndarray:
-        return self._cluster_prepared_descriptors(self._prepare_descriptors(descriptors))
+        return cluster_descriptors(
+            descriptors,
+            min_cluster_size=self.min_cluster_size,
+            random_seed=self.random_seed,
+        )
 
     def _bootstrap_stability(self, descriptors: np.ndarray, members: np.ndarray) -> float:
-        base_members = set(members.tolist())
-        scores = []
-        for _ in range(self.bootstrap_iterations):
-            bootstrap_rows = self.rng.integers(0, descriptors.shape[0], size=descriptors.shape[0])
-            bootstrap_labels = self._cluster_prepared_descriptors(descriptors[bootstrap_rows])
-            best = 0.0
-            for cluster_id in set(bootstrap_labels.tolist()):
-                if cluster_id == -1:
-                    continue
-                cluster_rows = set(np.unique(bootstrap_rows[bootstrap_labels == cluster_id]).tolist())
-                score = _jaccard(base_members, cluster_rows)
-                if score > best:
-                    best = score
-            scores.append(best)
-        return float(np.mean(scores)) if scores else 0.0
+        return bootstrap_cluster_stability(
+            descriptors,
+            members,
+            bootstrap_iterations=self.bootstrap_iterations,
+            rng=self.rng,
+            min_cluster_size=self.min_cluster_size,
+        )
 
     def _merge_node_clusters(
         self,
@@ -202,7 +158,7 @@ class CandidateCircuitDiscoverer:
         adjacency = defaultdict(set)
         for left in range(len(node_clusters)):
             for right in range(left + 1, len(node_clusters)):
-                if _jaccard(cluster_sets[left], cluster_sets[right]) >= self.merge_threshold:
+                if jaccard(cluster_sets[left], cluster_sets[right]) >= self.merge_threshold:
                     adjacency[left].add(right)
                     adjacency[right].add(left)
 
@@ -233,13 +189,13 @@ class CandidateCircuitDiscoverer:
             medoid_idx = max(
                 component,
                 key=lambda idx: np.mean([
-                    _jaccard(cluster_sets[idx], cluster_sets[other]) for other in component
+                    jaccard(cluster_sets[idx], cluster_sets[other]) for other in component
                 ]),
             )
             canonical_set = set(node_clusters[medoid_idx]["image_set"])
             active_nodes = []
             for cluster in family_clusters:
-                if _jaccard(set(cluster["image_set"]), canonical_set) >= self.node_threshold:
+                if jaccard(set(cluster["image_set"]), canonical_set) >= self.node_threshold:
                     active_nodes.append(tuple(cluster["node"]))
             active_nodes = self._largest_connected_component(active_nodes)
             if len(active_nodes) < 3 or len({layer for layer, _ in active_nodes}) < 2:
@@ -357,15 +313,6 @@ class CandidateCircuitDiscoverer:
         return False
 
 
-def _jaccard(left: set[int], right: set[int]) -> float:
-    if not left and not right:
-        return 1.0
-    union = left | right
-    if not union:
-        return 0.0
-    return len(left & right) / len(union)
-
-
 def summarize_seed_stability(
     seed_runs: list[dict],
     *,
@@ -390,12 +337,12 @@ def summarize_seed_stability(
             match = _match_circuit(circuit, run["circuits"])
             if match is None:
                 continue
-            observed_image_jaccards.append(_jaccard(set(circuit["image_set"]), set(match["image_set"])))
+            observed_image_jaccards.append(jaccard(set(circuit["image_set"]), set(match["image_set"])))
             observed_active_f1.append(_node_f1(circuit["active_nodes"], match["active_nodes"]))
 
             null_candidate = _matched_null_circuit(circuit, run["circuits"], rng=rng)
             if null_candidate is not None:
-                null_image_jaccards.append(_jaccard(set(circuit["image_set"]), set(null_candidate["image_set"])))
+                null_image_jaccards.append(jaccard(set(circuit["image_set"]), set(null_candidate["image_set"])))
                 null_active_f1.append(_node_f1(circuit["active_nodes"], null_candidate["active_nodes"]))
 
         n_observed = min(len(observed_image_jaccards), len(null_image_jaccards))

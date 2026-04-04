@@ -48,6 +48,8 @@ This repository is organized around the `flow_circuits/` package and the current
 | File | Purpose |
 |---|---|
 | `metrics.py` | Confirmatory/descriptive representation metrics, including one-step prediction summaries, same-split baseline comparisons, bootstrap confidence intervals, and external trajectory alignment against raw pooled-state and raw flow baselines. |
+| `efficient_validation.py` | Fast Phase B vs Phase C validation experiments used by `nb02`. |
+| `motif_validation.py` | Recurring motif-family discovery plus core and extended motif analyses used by `nb03` and `nb04`. |
 
 ### `flow_circuits/interventions/`
 
@@ -104,6 +106,8 @@ The supported notebook suite is:
 
 - `nb01_training_and_representation_metrics.ipynb`
 - `nb02_efficient_representation_and_circuit_validation.ipynb`
+- `nb03_recurring_motif_core_validation.ipynb`
+- `nb04_motif_extended_characterization.ipynb`
 
 Each notebook uses the current `flow_circuits` package and/or the `flow-*` CLIs only.
 

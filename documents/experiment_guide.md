@@ -22,6 +22,8 @@ These stages map onto the current notebook suite:
 
 - `nb01_training_and_representation_metrics.ipynb`
 - `nb02_efficient_representation_and_circuit_validation.ipynb`
+- `nb03_recurring_motif_core_validation.ipynb`
+- `nb04_motif_extended_characterization.ipynb`
 
 Each notebook is designed for Google Colab. The setup cell:
 
@@ -178,6 +180,26 @@ Use this notebook to:
 - reuse notebook-local cached experiment outputs across Colab sessions
 - decide whether Phase C is promising enough to justify the exhaustive CLI workflow
 
+### Notebook 3: Recurring Motif Core Validation
+
+Use this notebook to:
+
+- discover recurring motif families directly in `z`
+- compare motif galleries, persistence, predictiveness, and interventions for `phase_b.pt` vs `phase_c.pt`
+- reuse notebook-local motif artifacts instead of re-running exhaustive circuit discovery
+- answer the main “does alignment create better recurring multi-layer motifs?” question
+
+### Notebook 4: Motif Extended Characterization
+
+Use this notebook to:
+
+- inspect motif co-occurrence structure within each checkpoint
+- match Phase B motifs to Phase C motifs
+- characterize motif topology as spatial, depth-like, or fragmented
+- test whether motifs remain similar across overlapping rediscovery subsets
+
+`nb04` requires cached motif-family artifacts from `nb03` and will error if they are missing.
+
 ## Interpreting Outputs
 
 ### Confirmatory Analyses
@@ -207,7 +229,9 @@ Treat these as characterization, not gatekeeping:
 2. Evaluate the resulting `final.pt`
 3. Train `resnet18_aligned` and keep both `phase_b.pt` and `phase_c.pt`
 4. Run `nb02_efficient_representation_and_circuit_validation.ipynb`
-5. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the efficient notebook indicates the aligned representation is promising
+5. Run `nb03_recurring_motif_core_validation.ipynb`
+6. Run `nb04_motif_extended_characterization.ipynb` if you want the broader motif diagnostics
+7. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the aligned representation is promising
 
 ## Operational Notes
 
