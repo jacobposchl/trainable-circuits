@@ -229,3 +229,61 @@ def test_hard_pair_hybrid_only_overrides_trigger_pairs(monkeypatch):
     assert result["top_node_hybrid"]["net_gain"] == 1
     assert result["top_node_hybrid"]["override_coverage"] == 1.0
     assert result["top_node_hybrid"]["pairwise_win_rate_over_backbone"] >= 0.0
+
+
+def test_hard_pair_benchmark_reuses_cached_bundle(tmp_path, monkeypatch):
+    fit_z = torch.tensor(
+        [
+            [[[2.0, 0.0]], [[2.0, 0.0]]],
+            [[[2.1, 0.0]], [[1.9, 0.0]]],
+            [[[0.0, 2.0]], [[0.0, 2.0]]],
+            [[[0.0, 2.1]], [[0.0, 1.9]]],
+        ]
+    )
+    queued = [
+        _make_outputs(fit_z, torch.tensor([0, 0, 1, 1]), torch.zeros(4, 2)),
+        _make_outputs(fit_z.clone(), torch.tensor([0, 0, 1, 1]), torch.tensor([[1.0, 3.0], [1.0, 3.0], [0.2, 3.0], [0.2, 2.9]])),
+        _make_outputs(fit_z.clone(), torch.tensor([0, 0, 1, 1]), torch.zeros(4, 2)),
+    ]
+    monkeypatch.setattr(
+        "flow_circuits.evaluation.interpretability_validation.collect_interpretability_outputs",
+        lambda *args, **kwargs: queued.pop(0),
+    )
+    output_path = tmp_path / "phase_b" / "hard_pair_probe_benchmark.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    first = run_hard_pair_probe_benchmark_experiment(
+        SimpleNamespace(),
+        fit_loader=object(),
+        val_loader=object(),
+        test_loader=object(),
+        device=torch.device("cpu"),
+        checkpoint_tag="phase_b",
+        fit_max_images=4,
+        val_max_images=4,
+        test_max_images=4,
+        top_pairs=1,
+        top_k_nodes=1,
+        output_path=output_path,
+    )
+
+    monkeypatch.setattr(
+        "flow_circuits.evaluation.interpretability_validation.collect_interpretability_outputs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should reuse cached split and bundle")),
+    )
+    second = run_hard_pair_probe_benchmark_experiment(
+        SimpleNamespace(),
+        fit_loader=object(),
+        val_loader=object(),
+        test_loader=object(),
+        device=torch.device("cpu"),
+        checkpoint_tag="phase_b",
+        fit_max_images=4,
+        val_max_images=4,
+        test_max_images=4,
+        top_pairs=1,
+        top_k_nodes=1,
+        output_path=output_path,
+    )
+
+    assert first["pair_rows"] == second["pair_rows"]

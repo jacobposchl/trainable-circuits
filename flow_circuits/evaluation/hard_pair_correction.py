@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from sklearn.metrics import (
@@ -12,6 +14,10 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 import torch
+try:
+    from threadpoolctl import threadpool_limits
+except ImportError:  # pragma: no cover
+    threadpool_limits = None
 
 from flow_circuits.evaluation.interpretability_validation import (
     CIFAR10_CLASS_NAMES,
@@ -44,6 +50,145 @@ NB06_EXPERIMENT_IDS = [
 ]
 
 
+def _resolve_n_jobs(n_jobs: int | None) -> int:
+    if n_jobs is None:
+        cpu_count = os.cpu_count() or 1
+        return max(1, min(cpu_count, 8))
+    return max(1, int(n_jobs))
+
+
+def _state_path(output_path: str | Path | None) -> Path | None:
+    if output_path is None:
+        return None
+    path = Path(output_path)
+    return path.with_suffix(path.suffix + ".state.pt")
+
+
+def _feature_cache_path(
+    output_path: str | Path | None,
+    *,
+    checkpoint_tag: str,
+    fit_max_images: int,
+    val_max_images: int,
+    test_max_images: int,
+) -> Path | None:
+    if output_path is None:
+        return None
+    path = Path(output_path)
+    cache_dir = path.parent / "_feature_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir / f"{checkpoint_tag}_fit{fit_max_images}_val{val_max_images}_test{test_max_images}.pt"
+
+
+def _bundle_cache_path(
+    output_path: str | Path | None,
+    *,
+    checkpoint_tag: str,
+    fit_max_images: int,
+    val_max_images: int,
+    test_max_images: int,
+    top_pairs: int,
+    top_k_nodes: int,
+    c_grid: tuple[float, ...],
+) -> Path | None:
+    if output_path is None:
+        return None
+    path = Path(output_path)
+    cache_dir = path.parent / "_pair_bundle_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    c_key = "-".join(str(value) for value in c_grid)
+    return cache_dir / (
+        f"{checkpoint_tag}_fit{fit_max_images}_val{val_max_images}_test{test_max_images}"
+        f"_pairs{top_pairs}_nodes{top_k_nodes}_c{c_key}.pt"
+    )
+
+
+def _save_state(state_path: Path | None, state: dict) -> None:
+    if state_path is None:
+        return
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(state, state_path)
+
+
+def _load_state(state_path: Path | None) -> dict | None:
+    if state_path is None or not state_path.exists():
+        return None
+    return torch.load(state_path, map_location="cpu", weights_only=False)
+
+
+def _clear_state(state_path: Path | None) -> None:
+    if state_path is not None and state_path.exists():
+        state_path.unlink()
+
+
+def _collect_probe_splits_cached(
+    components: LoadedFlowComponents,
+    fit_loader,
+    val_loader,
+    test_loader,
+    *,
+    device: torch.device,
+    checkpoint_tag: str,
+    fit_max_images: int,
+    val_max_images: int,
+    test_max_images: int,
+    tracker: _ProgressTracker,
+    stage_prefix: str,
+    output_path: str | Path | None,
+) -> tuple[dict, dict, dict]:
+    cache_path = _feature_cache_path(
+        output_path,
+        checkpoint_tag=checkpoint_tag,
+        fit_max_images=fit_max_images,
+        val_max_images=val_max_images,
+        test_max_images=test_max_images,
+    )
+    if cache_path is not None and cache_path.exists():
+        tracker.emit(
+            stage=f"{stage_prefix}_feature_cache",
+            completed=1,
+            total=1,
+            message="loading cached fit/val/test probe splits",
+        )
+        cached = torch.load(cache_path, map_location="cpu", weights_only=False)
+        return cached["fit_outputs"], cached["val_outputs"], cached["test_outputs"]
+    fit_outputs, val_outputs, test_outputs = _collect_probe_splits(
+        components,
+        fit_loader,
+        val_loader,
+        test_loader,
+        device=device,
+        fit_max_images=fit_max_images,
+        val_max_images=val_max_images,
+        test_max_images=test_max_images,
+        tracker=tracker,
+        stage_prefix=stage_prefix,
+    )
+    if cache_path is not None:
+        torch.save(
+            {
+                "fit_outputs": fit_outputs,
+                "val_outputs": val_outputs,
+                "test_outputs": test_outputs,
+            },
+            cache_path,
+        )
+    return fit_outputs, val_outputs, test_outputs
+
+
+def _parallel_map(items: list[tuple[int, int]], worker, *, n_jobs: int) -> list[dict]:
+    if not items:
+        return []
+    if n_jobs <= 1:
+        return [worker(item) for item in items]
+    if threadpool_limits is not None:
+        with threadpool_limits(limits=1):
+            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+                return list(executor.map(worker, items))
+    with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+        return list(executor.map(worker, items))
+
+
 def run_multiclass_z_probe_audit_experiment(
     components: LoadedFlowComponents,
     fit_loader,
@@ -55,6 +200,7 @@ def run_multiclass_z_probe_audit_experiment(
     fit_max_images: int,
     val_max_images: int,
     test_max_images: int,
+    n_jobs: int | None = None,
     c_grid: tuple[float, ...] = (0.1, 1.0, 10.0),
     output_path: str | Path | None = None,
     progress_callback=None,
@@ -64,18 +210,21 @@ def run_multiclass_z_probe_audit_experiment(
         checkpoint_tag=checkpoint_tag,
         progress_callback=progress_callback,
     )
-    fit_outputs, val_outputs, test_outputs = _collect_probe_splits(
+    fit_outputs, val_outputs, test_outputs = _collect_probe_splits_cached(
         components,
         fit_loader,
         val_loader,
         test_loader,
         device=device,
+        checkpoint_tag=checkpoint_tag,
         fit_max_images=fit_max_images,
         val_max_images=val_max_images,
         test_max_images=test_max_images,
         tracker=tracker,
         stage_prefix=MULTICLASS_PROBE_AUDIT_ID,
+        output_path=output_path,
     )
+    n_jobs = _resolve_n_jobs(n_jobs)
     z_fit = fit_outputs["z"].numpy()
     z_val = val_outputs["z"].numpy()
     z_test = test_outputs["z"].numpy()
@@ -92,9 +241,20 @@ def run_multiclass_z_probe_audit_experiment(
     )
     global_eval = _evaluate_multiclass_model(global_model, _global_probe_features(z_test), y_test)
 
-    per_layer = []
+    state_path = _state_path(output_path)
+    resume_state = _load_state(state_path) or {}
+    per_layer = list(resume_state.get("per_layer", []))
     n_layers = z_fit.shape[1]
+    completed_layer_ids = {int(row["layer_idx"]) for row in per_layer}
     for layer_idx in range(n_layers):
+        if layer_idx in completed_layer_ids:
+            tracker.emit(
+                stage="per_layer_probe",
+                completed=layer_idx + 1,
+                total=n_layers,
+                message="reusing checkpointed per-layer probe",
+            )
+            continue
         layer_result = _fit_probe_result(
             _layer_probe_features(z_fit, layer_idx),
             y_fit,
@@ -119,44 +279,70 @@ def run_multiclass_z_probe_audit_experiment(
             total=n_layers,
             message="fitting per-layer multinomial probes",
         )
+        _save_state(
+            state_path,
+            {
+                "per_layer": per_layer,
+                "per_node": list(resume_state.get("per_node", [])),
+            },
+        )
 
-    per_node = []
+    per_node = list(resume_state.get("per_node", []))
     total_nodes = z_fit.shape[1] * z_fit.shape[2]
-    node_counter = 0
-    for layer_idx in range(z_fit.shape[1]):
-        for cell_idx in range(z_fit.shape[2]):
-            node_counter += 1
-            node_model = _fit_probe_model(
-                _node_probe_features(z_fit, layer_idx, cell_idx),
-                y_fit,
-                _node_probe_features(z_val, layer_idx, cell_idx),
-                y_val,
-                c_grid=c_grid,
-            )
-            node_eval = _evaluate_multiclass_model(
-                node_model,
-                _node_probe_features(z_test, layer_idx, cell_idx),
-                y_test,
-            )
-            per_node.append(
+    completed_node_keys = {(int(row["layer_idx"]), int(row["cell_idx"])) for row in per_node}
+    remaining_nodes = [
+        (layer_idx, cell_idx)
+        for layer_idx in range(z_fit.shape[1])
+        for cell_idx in range(z_fit.shape[2])
+        if (layer_idx, cell_idx) not in completed_node_keys
+    ]
+
+    def _node_worker(item: tuple[int, int]) -> dict:
+        layer_idx, cell_idx = item
+        node_model = _fit_probe_model(
+            _node_probe_features(z_fit, layer_idx, cell_idx),
+            y_fit,
+            _node_probe_features(z_val, layer_idx, cell_idx),
+            y_val,
+            c_grid=c_grid,
+        )
+        node_eval = _evaluate_multiclass_model(
+            node_model,
+            _node_probe_features(z_test, layer_idx, cell_idx),
+            y_test,
+        )
+        return {
+            "layer_idx": int(layer_idx),
+            "cell_idx": int(cell_idx),
+            "val_accuracy": float(node_model["val_accuracy"]),
+            "accuracy": node_eval["accuracy"],
+            "macro_f1": node_eval["macro_f1"],
+            "log_loss": node_eval["log_loss"],
+            "top2_accuracy": node_eval["top2_accuracy"],
+            "selected_c": float(node_model["selected_c"]),
+            "coef_norm": float(node_eval["coef_norm"]),
+        }
+
+    completed_count = len(per_node)
+    batched_results = _parallel_map(remaining_nodes, _node_worker, n_jobs=n_jobs)
+    for row in batched_results:
+        completed_count += 1
+        per_node.append(row)
+        tracker.emit(
+            stage="per_node_probe",
+            completed=completed_count,
+            total=total_nodes,
+            message="fitting per-node multinomial probes",
+        )
+        if completed_count % max(1, min(8, n_jobs)) == 0 or completed_count == total_nodes:
+            _save_state(
+                state_path,
                 {
-                    "layer_idx": int(layer_idx),
-                    "cell_idx": int(cell_idx),
-                    "val_accuracy": float(node_model["val_accuracy"]),
-                    "accuracy": node_eval["accuracy"],
-                    "macro_f1": node_eval["macro_f1"],
-                    "log_loss": node_eval["log_loss"],
-                    "top2_accuracy": node_eval["top2_accuracy"],
-                    "selected_c": float(node_model["selected_c"]),
-                    "coef_norm": float(node_eval["coef_norm"]),
-                }
+                    "per_layer": per_layer,
+                    "per_node": per_node,
+                },
             )
-            tracker.emit(
-                stage="per_node_probe",
-                completed=node_counter,
-                total=total_nodes,
-                message="fitting per-node multinomial probes",
-            )
+    _clear_state(state_path)
 
     result = {
         "experiment": MULTICLASS_PROBE_AUDIT_ID,
@@ -206,6 +392,7 @@ def run_hard_pair_probe_benchmark_experiment(
     test_max_images: int,
     top_pairs: int = 3,
     top_k_nodes: int = 3,
+    n_jobs: int | None = None,
     c_grid: tuple[float, ...] = (0.1, 1.0, 10.0),
     output_path: str | Path | None = None,
     progress_callback=None,
@@ -222,7 +409,9 @@ def run_hard_pair_probe_benchmark_experiment(
         test_max_images=test_max_images,
         top_pairs=top_pairs,
         top_k_nodes=top_k_nodes,
+        n_jobs=n_jobs,
         c_grid=c_grid,
+        output_path=output_path,
         experiment_id=HARD_PAIR_PROBE_BENCHMARK_ID,
         progress_callback=progress_callback,
     )
@@ -260,6 +449,7 @@ def run_hard_pair_hybrid_correction_experiment(
     test_max_images: int,
     top_pairs: int = 3,
     top_k_nodes: int = 3,
+    n_jobs: int | None = None,
     c_grid: tuple[float, ...] = (0.1, 1.0, 10.0),
     output_path: str | Path | None = None,
     progress_callback=None,
@@ -276,7 +466,9 @@ def run_hard_pair_hybrid_correction_experiment(
         test_max_images=test_max_images,
         top_pairs=top_pairs,
         top_k_nodes=top_k_nodes,
+        n_jobs=n_jobs,
         c_grid=c_grid,
+        output_path=output_path,
         experiment_id=HYBRID_CORRECTION_ID,
         progress_callback=progress_callback,
     )
@@ -318,6 +510,7 @@ def run_hard_pair_case_study_experiment(
     top_pairs: int = 3,
     top_k_nodes: int = 3,
     exemplar_count: int = 6,
+    n_jobs: int | None = None,
     c_grid: tuple[float, ...] = (0.1, 1.0, 10.0),
     output_path: str | Path | None = None,
     progress_callback=None,
@@ -334,7 +527,9 @@ def run_hard_pair_case_study_experiment(
         test_max_images=test_max_images,
         top_pairs=top_pairs,
         top_k_nodes=top_k_nodes,
+        n_jobs=n_jobs,
         c_grid=c_grid,
+        output_path=output_path,
         experiment_id=CORRECTION_CASE_STUDIES_ID,
         progress_callback=progress_callback,
     )
@@ -382,7 +577,9 @@ def _prepare_hard_pair_bundle(
     test_max_images: int,
     top_pairs: int,
     top_k_nodes: int,
+    n_jobs: int | None,
     c_grid: tuple[float, ...],
+    output_path: str | Path | None,
     experiment_id: str,
     progress_callback,
 ) -> dict:
@@ -391,18 +588,21 @@ def _prepare_hard_pair_bundle(
         checkpoint_tag=checkpoint_tag,
         progress_callback=progress_callback,
     )
-    fit_outputs, val_outputs, test_outputs = _collect_probe_splits(
+    fit_outputs, val_outputs, test_outputs = _collect_probe_splits_cached(
         components,
         fit_loader,
         val_loader,
         test_loader,
         device=device,
+        checkpoint_tag=checkpoint_tag,
         fit_max_images=fit_max_images,
         val_max_images=val_max_images,
         test_max_images=test_max_images,
         tracker=tracker,
         stage_prefix=experiment_id,
+        output_path=output_path,
     )
+    n_jobs = _resolve_n_jobs(n_jobs)
     fit_z = fit_outputs["z"].numpy()
     val_z = val_outputs["z"].numpy()
     test_z = test_outputs["z"].numpy()
@@ -411,10 +611,41 @@ def _prepare_hard_pair_bundle(
     test_labels = test_outputs["labels"].numpy()
     val_pred = val_outputs["logits"].argmax(dim=1).numpy()
     pair_counts = _top_confusion_pairs(val_labels, val_pred, top_pairs=int(top_pairs))
+    bundle_cache = _bundle_cache_path(
+        output_path,
+        checkpoint_tag=checkpoint_tag,
+        fit_max_images=fit_max_images,
+        val_max_images=val_max_images,
+        test_max_images=test_max_images,
+        top_pairs=top_pairs,
+        top_k_nodes=top_k_nodes,
+        c_grid=c_grid,
+    )
+    if bundle_cache is not None and bundle_cache.exists():
+        tracker.emit(
+            stage="pair_bundle_cache",
+            completed=1,
+            total=1,
+            message="loading cached hard-pair probe bundle",
+        )
+        cached = torch.load(bundle_cache, map_location="cpu", weights_only=False)
+        return {
+            "pair_rows": cached["pair_rows"],
+            "pair_infos": cached["pair_infos"],
+            "test_outputs": test_outputs,
+        }
 
-    pair_rows = []
-    pair_infos = []
-    for pair_idx, (left_label, right_label, count) in enumerate(pair_counts, start=1):
+    state_path = _state_path(output_path)
+    resume_state = _load_state(state_path) or {}
+    pair_rows = list(resume_state.get("pair_rows", []))
+    pair_infos = list(resume_state.get("pair_infos", []))
+    completed_pair_keys = {(int(row["left_label"]), int(row["right_label"])) for row in pair_rows}
+    remaining_pairs = [
+        (left_label, right_label, count)
+        for left_label, right_label, count in pair_counts
+        if (int(left_label), int(right_label)) not in completed_pair_keys
+    ]
+    for pair_idx, (left_label, right_label, count) in enumerate(remaining_pairs, start=len(pair_rows) + 1):
         pair_info = _fit_pair_models(
             fit_z=fit_z,
             val_z=val_z,
@@ -427,6 +658,7 @@ def _prepare_hard_pair_bundle(
             right_label=int(right_label),
             backbone_confusion_count=int(count),
             top_k_nodes=int(top_k_nodes),
+            n_jobs=n_jobs,
             c_grid=c_grid,
         )
         pair_infos.append(pair_info)
@@ -436,6 +668,22 @@ def _prepare_hard_pair_bundle(
             completed=pair_idx,
             total=len(pair_counts),
             message=f"fitting hard-pair probes for {_label_name(left_label)} vs {_label_name(right_label)}",
+        )
+        _save_state(
+            state_path,
+            {
+                "pair_rows": pair_rows,
+                "pair_infos": pair_infos,
+            },
+        )
+    _clear_state(state_path)
+    if bundle_cache is not None:
+        torch.save(
+            {
+                "pair_rows": pair_rows,
+                "pair_infos": pair_infos,
+            },
+            bundle_cache,
         )
     return {
         "pair_rows": pair_rows,
@@ -457,6 +705,7 @@ def _fit_pair_models(
     right_label: int,
     backbone_confusion_count: int,
     top_k_nodes: int,
+    n_jobs: int,
     c_grid: tuple[float, ...],
 ) -> dict:
     fit_mask = np.isin(fit_labels, [left_label, right_label])
@@ -476,37 +725,42 @@ def _fit_pair_models(
     )
     full_eval = _evaluate_binary_model(full_model, _global_probe_features(test_z[test_mask]), test_y)
 
-    node_rows = []
-    for layer_idx in range(test_z.shape[1]):
-        for cell_idx in range(test_z.shape[2]):
-            node_model = _fit_probe_model(
-                _node_probe_features(fit_z[fit_mask], layer_idx, cell_idx),
-                fit_y,
-                _node_probe_features(val_z[val_mask], layer_idx, cell_idx),
-                val_y,
-                c_grid=c_grid,
-            )
-            val_eval = _evaluate_binary_model(
-                node_model,
-                _node_probe_features(val_z[val_mask], layer_idx, cell_idx),
-                val_y,
-            )
-            test_eval = _evaluate_binary_model(
-                node_model,
-                _node_probe_features(test_z[test_mask], layer_idx, cell_idx),
-                test_y,
-            )
-            node_rows.append(
-                {
-                    "layer_idx": int(layer_idx),
-                    "cell_idx": int(cell_idx),
-                    "val_accuracy": val_eval["accuracy"],
-                    "val_macro_f1": val_eval["macro_f1"],
-                    "test_accuracy": test_eval["accuracy"],
-                    "test_macro_f1": test_eval["macro_f1"],
-                    "coef_norm": test_eval["coef_norm"],
-                }
-            )
+    node_items = [
+        (layer_idx, cell_idx)
+        for layer_idx in range(test_z.shape[1])
+        for cell_idx in range(test_z.shape[2])
+    ]
+
+    def _node_worker(item: tuple[int, int]) -> dict:
+        layer_idx, cell_idx = item
+        node_model = _fit_probe_model(
+            _node_probe_features(fit_z[fit_mask], layer_idx, cell_idx),
+            fit_y,
+            _node_probe_features(val_z[val_mask], layer_idx, cell_idx),
+            val_y,
+            c_grid=c_grid,
+        )
+        val_eval = _evaluate_binary_model(
+            node_model,
+            _node_probe_features(val_z[val_mask], layer_idx, cell_idx),
+            val_y,
+        )
+        test_eval = _evaluate_binary_model(
+            node_model,
+            _node_probe_features(test_z[test_mask], layer_idx, cell_idx),
+            test_y,
+        )
+        return {
+            "layer_idx": int(layer_idx),
+            "cell_idx": int(cell_idx),
+            "val_accuracy": val_eval["accuracy"],
+            "val_macro_f1": val_eval["macro_f1"],
+            "test_accuracy": test_eval["accuracy"],
+            "test_macro_f1": test_eval["macro_f1"],
+            "coef_norm": test_eval["coef_norm"],
+        }
+
+    node_rows = _parallel_map(node_items, _node_worker, n_jobs=n_jobs)
     node_rows.sort(
         key=lambda row: (
             -row["val_accuracy"],
