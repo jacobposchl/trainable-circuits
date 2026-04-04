@@ -46,10 +46,14 @@ def run_backbone_and_z_training_workflow(
 ) -> dict:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    _print_section("Notebook 1 Workflow")
+    print(f"Output directory: {output_dir}")
+    print(f"Force rerun     : {force_rerun}")
     backbone_checkpoint = output_dir / "backbone_supervised.pt"
     backbone_summary_path = output_dir / "backbone_summary.json"
 
     if force_rerun or not backbone_checkpoint.exists():
+        print("\n[Backbone] Training supervised backbone because checkpoint is missing or FORCE_RERUN=True.")
         backbone_summary = _train_supervised_backbone(
             base_config,
             backbone_epochs=backbone_epochs,
@@ -57,6 +61,7 @@ def run_backbone_and_z_training_workflow(
         )
         backbone_summary_path.write_text(json.dumps(backbone_summary, indent=2), encoding="utf-8")
     else:
+        print(f"\n[Backbone] Reusing existing checkpoint: {backbone_checkpoint.name}")
         backbone_summary = json.loads(backbone_summary_path.read_text(encoding="utf-8")) if backbone_summary_path.exists() else {
             "output_path": str(backbone_checkpoint)
         }
@@ -65,6 +70,7 @@ def run_backbone_and_z_training_workflow(
     frozen_dir.mkdir(parents=True, exist_ok=True)
     phase_b_frozen_path = frozen_dir / "phase_b_frozen.pt"
     if force_rerun or not phase_b_frozen_path.exists():
+        print("\n[Frozen Branch] Training Phase A/B because frozen Phase B checkpoint is missing or FORCE_RERUN=True.")
         frozen_summary = _train_frozen_phase_ab(
             base_config,
             backbone_checkpoint=backbone_checkpoint,
@@ -73,7 +79,9 @@ def run_backbone_and_z_training_workflow(
             phase_b_epochs=phase_b_epochs,
         )
         shutil.copy2(frozen_dir / "phase_b.pt", phase_b_frozen_path)
+        print(f"[Frozen Branch] Saved canonical frozen Phase B checkpoint: {phase_b_frozen_path.name}")
     else:
+        print(f"\n[Frozen Branch] Reusing existing Phase B checkpoint: {phase_b_frozen_path.name}")
         frozen_summary = json.loads((frozen_dir / "phase_ab_summary.json").read_text(encoding="utf-8")) if (frozen_dir / "phase_ab_summary.json").exists() else {}
 
     frozen_candidates = _run_phase_c_milestone_sweep(
@@ -94,6 +102,7 @@ def run_backbone_and_z_training_workflow(
     if joint_branch_enabled:
         joint_dir = output_dir / "joint_branch"
         joint_dir.mkdir(parents=True, exist_ok=True)
+        print("\n[Joint Branch] Warm-starting joint Phase C sweeps from frozen Phase B checkpoint.")
         joint_candidates = _run_phase_c_milestone_sweep(
             base_config=base_config,
             phase_b_checkpoint=phase_b_frozen_path,
@@ -107,6 +116,8 @@ def run_backbone_and_z_training_workflow(
             backbone_lr_multiplier=joint_backbone_lr_multiplier,
             force_rerun=force_rerun,
         )
+    else:
+        print("\n[Joint Branch] Disabled. Skipping joint Phase C sweeps.")
 
     summary = {
         "backbone_checkpoint": str(backbone_checkpoint),
@@ -117,6 +128,7 @@ def run_backbone_and_z_training_workflow(
         "joint_phase_c_candidates": joint_candidates,
     }
     (output_dir / "training_candidates.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"\nSaved training candidate manifest: {(output_dir / 'training_candidates.json').name}")
     return summary
 
 
@@ -187,12 +199,34 @@ def _run_phase_c_milestone_sweep(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = output_dir / f"{branch_tag}_phase_c_manifest.json"
-    if manifest_path.exists() and not force_rerun:
-        return json.loads(manifest_path.read_text(encoding="utf-8"))
-
     milestones = sorted({int(epoch) for epoch in milestones if 1 <= int(epoch) <= int(max_epochs)})
     if max_epochs not in milestones:
         milestones.append(int(max_epochs))
+    expected_paths = _expected_phase_c_paths(
+        output_dir=output_dir,
+        branch_tag=branch_tag,
+        lambda_traj_candidates=lambda_traj_candidates,
+        milestones=milestones,
+    )
+
+    _print_section(f"{branch_tag.title()} Phase C Sweep")
+    print(f"Starting checkpoint : {Path(phase_b_checkpoint).name}")
+    print(f"Train backbone      : {train_backbone}")
+    print(f"CE weight           : {ce_weight}")
+    print(f"Milestone epochs    : {milestones}")
+    print("Checkpoint status:")
+    for line in _checkpoint_status_lines(expected_paths):
+        print(f"  {line}")
+
+    if manifest_path.exists() and not force_rerun:
+        print(f"Manifest exists, reusing sweep outputs: {manifest_path.name}")
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    if force_rerun:
+        print("FORCE_RERUN=True, recomputing sweep even if checkpoint files already exist.")
+    elif any(path.exists() for path in expected_paths.values()):
+        print("Some sweep checkpoints already exist, but manifest is missing. Recomputing sweep to rebuild a complete manifest.")
+
     cfg = deepcopy(base_config)
     cfg.setdefault("backbone", {})
     cfg["backbone"]["freeze_backbone"] = not train_backbone
@@ -217,6 +251,12 @@ def _run_phase_c_milestone_sweep(
 
     candidates: list[dict] = []
     for lambda_traj in [float(value) for value in lambda_traj_candidates]:
+        print(f"\n[{branch_tag}] lambda_traj={lambda_traj:.4f}")
+        for epoch in milestones:
+            checkpoint_path = expected_paths[(float(lambda_traj), int(epoch))]
+            status = "exists" if checkpoint_path.exists() else "missing"
+            print(f"  milestone epoch {epoch:>3}: {status:>7} -> {checkpoint_path.name}")
+
         components = load_components_from_checkpoint(
             phase_b_checkpoint,
             device,
@@ -240,6 +280,10 @@ def _run_phase_c_milestone_sweep(
         criterion = nn.CrossEntropyLoss()
         history: list[dict] = []
         for epoch_idx in range(1, int(max_epochs) + 1):
+            print(
+                f"  [{branch_tag}] lambda={lambda_traj:.4f} | epoch {epoch_idx:>2}/{int(max_epochs)}"
+                f" | running train+val"
+            )
             train_metrics = _run_branch_epoch(
                 components,
                 loader=loaders["fit"],
@@ -274,8 +318,17 @@ def _run_phase_c_milestone_sweep(
                     "val": val_metrics,
                 }
             )
+            print(
+                "    "
+                f"train_loss={train_metrics['loss']:.4f} "
+                f"pred_cos={train_metrics['prediction_cosine']:.4f} "
+                f"val_loss={val_metrics['loss']:.4f} "
+                f"val_pred_cos={val_metrics['prediction_cosine']:.4f}"
+                + (f" ce={val_metrics['ce_loss']:.4f}" if ce_weight > 0.0 else "")
+            )
             if epoch_idx not in milestones:
                 continue
+            print(f"    milestone reached at epoch {epoch_idx}; collecting held-out validation metrics...")
             rep_metrics = _validation_metrics(
                 components,
                 loader=loaders["val"],
@@ -284,8 +337,7 @@ def _run_phase_c_milestone_sweep(
                 alignment_max_pairs=int(cfg["training"].get("alignment_max_pairs", 2048)),
                 seed=int(cfg["data"].get("seed", 0)),
             )
-            checkpoint_name = f"phase_c_{branch_tag}_lambda_{_lambda_key(lambda_traj)}_epoch_{epoch_idx}.pt"
-            checkpoint_path = output_dir / checkpoint_name
+            checkpoint_path = expected_paths[(float(lambda_traj), int(epoch_idx))]
             checkpoint_config = deepcopy(cfg)
             checkpoint_config["objectives"]["lambda_traj"] = float(lambda_traj)
             checkpoint_config["logging"]["checkpoint_dir"] = str(output_dir)
@@ -306,6 +358,12 @@ def _run_phase_c_milestone_sweep(
                     "history": history,
                 },
             )
+            print(
+                "    saved "
+                f"{checkpoint_path.name} | pred_cos={rep_metrics['prediction_cosine_mean']:.4f} "
+                f"recon_cos={rep_metrics['reconstruction_cosine_mean']:.4f} "
+                f"traj_align={rep_metrics['trajectory_alignment_mean']:.4f}"
+            )
             candidates.append(
                 {
                     "branch_tag": branch_tag,
@@ -320,6 +378,7 @@ def _run_phase_c_milestone_sweep(
                 }
             )
     manifest_path.write_text(json.dumps(candidates, indent=2), encoding="utf-8")
+    print(f"\n[{branch_tag}] Sweep complete. Wrote manifest: {manifest_path.name}")
     return candidates
 
 
@@ -451,3 +510,33 @@ def _validation_metrics(
 
 def _lambda_key(value: float) -> str:
     return str(value).replace(".", "p")
+
+
+def _expected_phase_c_paths(
+    *,
+    output_dir: Path,
+    branch_tag: str,
+    lambda_traj_candidates: list[float] | tuple[float, ...],
+    milestones: list[int],
+) -> dict[tuple[float, int], Path]:
+    paths: dict[tuple[float, int], Path] = {}
+    for lambda_traj in [float(value) for value in lambda_traj_candidates]:
+        for epoch in [int(value) for value in milestones]:
+            checkpoint_name = f"phase_c_{branch_tag}_lambda_{_lambda_key(lambda_traj)}_epoch_{epoch}.pt"
+            paths[(float(lambda_traj), int(epoch))] = output_dir / checkpoint_name
+    return paths
+
+
+def _checkpoint_status_lines(expected_paths: dict[tuple[float, int], Path]) -> list[str]:
+    lines: list[str] = []
+    for (lambda_traj, epoch), path in sorted(expected_paths.items(), key=lambda item: (item[0][0], item[0][1])):
+        status = "exists" if path.exists() else "missing"
+        lines.append(f"lambda={lambda_traj:<4} epoch={epoch:<3} {status:<7} {path.name}")
+    return lines
+
+
+def _print_section(title: str) -> None:
+    line = "=" * max(64, len(title) + 8)
+    print(f"\n{line}")
+    print(title)
+    print(line)
