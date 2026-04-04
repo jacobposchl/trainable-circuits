@@ -273,15 +273,18 @@ def _run_phase_c_milestone_sweep(
             status = "exists" if checkpoint_path.exists() else "missing"
             print(f"  milestone epoch {epoch:>3}: {status:>7} -> {checkpoint_path.name}")
         if existing_epochs_for_lambda and max(existing_epochs_for_lambda) >= int(max_epochs):
-            print(f"  all milestones already present for lambda={lambda_traj:.4f}; skipping training.")
+            print(
+                f"  action: SKIP lambda={lambda_traj:.4f} because all requested milestones already exist "
+                f"(latest saved epoch={max(existing_epochs_for_lambda)})."
+            )
             continue
 
         latest_existing_epoch = max(existing_epochs_for_lambda) if existing_epochs_for_lambda else 0
         if latest_existing_epoch > 0:
             resume_checkpoint = expected_paths[(float(lambda_traj), int(latest_existing_epoch))]
             print(
-                f"  resuming from existing checkpoint {resume_checkpoint.name}"
-                f" at epoch {latest_existing_epoch}"
+                f"  action: RESUME lambda={lambda_traj:.4f} from {resume_checkpoint.name} "
+                f"(latest saved epoch={latest_existing_epoch}; next epoch={latest_existing_epoch + 1})."
             )
             components = load_components_from_checkpoint(
                 resume_checkpoint,
@@ -310,7 +313,10 @@ def _run_phase_c_milestone_sweep(
             )
             start_epoch = int(latest_existing_epoch) + 1
         else:
-            print(f"  no existing milestones for lambda={lambda_traj:.4f}; starting from Phase B checkpoint.")
+            print(
+                f"  action: START lambda={lambda_traj:.4f} from Phase B checkpoint "
+                f"because no saved milestones exist yet."
+            )
             components = load_components_from_checkpoint(
                 phase_b_checkpoint,
                 device,
