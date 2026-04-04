@@ -225,7 +225,7 @@ def _run_phase_c_milestone_sweep(
     if force_rerun:
         print("FORCE_RERUN=True, recomputing sweep even if checkpoint files already exist.")
     elif any(path.exists() for path in expected_paths.values()):
-        print("Some sweep checkpoints already exist, but manifest is missing. Recomputing sweep to rebuild a complete manifest.")
+        print("Some sweep checkpoints already exist, but manifest is missing. Reconstructing manifest from saved checkpoints and training only missing milestones.")
 
     cfg = deepcopy(base_config)
     cfg.setdefault("backbone", {})
@@ -249,37 +249,93 @@ def _run_phase_c_milestone_sweep(
         download=cfg["data"].get("download", True),
     )
 
-    candidates: list[dict] = []
+    existing_candidates = _reconstruct_phase_c_candidates(
+        output_dir=output_dir,
+        branch_tag=branch_tag,
+        lambda_traj_candidates=lambda_traj_candidates,
+        milestones=milestones,
+    )
+    candidates: list[dict] = list(existing_candidates)
+    existing_candidate_keys = {
+        (float(row["lambda_traj"]), int(row["epoch"]))
+        for row in existing_candidates
+    }
+
     for lambda_traj in [float(value) for value in lambda_traj_candidates]:
         print(f"\n[{branch_tag}] lambda_traj={lambda_traj:.4f}")
+        existing_epochs_for_lambda = sorted(
+            epoch
+            for candidate_lambda, epoch in existing_candidate_keys
+            if candidate_lambda == float(lambda_traj)
+        )
         for epoch in milestones:
             checkpoint_path = expected_paths[(float(lambda_traj), int(epoch))]
             status = "exists" if checkpoint_path.exists() else "missing"
             print(f"  milestone epoch {epoch:>3}: {status:>7} -> {checkpoint_path.name}")
+        if existing_epochs_for_lambda and max(existing_epochs_for_lambda) >= int(max_epochs):
+            print(f"  all milestones already present for lambda={lambda_traj:.4f}; skipping training.")
+            continue
 
-        components = load_components_from_checkpoint(
-            phase_b_checkpoint,
-            device,
-            config_overrides={
-                "backbone": {"freeze_backbone": not train_backbone},
-                "training": {
-                    "train_backbone": bool(train_backbone),
-                    "ce_weight": float(ce_weight),
-                    "backbone_lr_multiplier": float(backbone_lr_multiplier),
+        latest_existing_epoch = max(existing_epochs_for_lambda) if existing_epochs_for_lambda else 0
+        if latest_existing_epoch > 0:
+            resume_checkpoint = expected_paths[(float(lambda_traj), int(latest_existing_epoch))]
+            print(
+                f"  resuming from existing checkpoint {resume_checkpoint.name}"
+                f" at epoch {latest_existing_epoch}"
+            )
+            components = load_components_from_checkpoint(
+                resume_checkpoint,
+                device,
+                config_overrides={
+                    "backbone": {"freeze_backbone": not train_backbone},
+                    "training": {
+                        "train_backbone": bool(train_backbone),
+                        "ce_weight": float(ce_weight),
+                        "backbone_lr_multiplier": float(backbone_lr_multiplier),
+                    },
                 },
-            },
-        )
-        optimizer = _build_optimizer(
-            components,
-            base_lr=base_lr,
-            weight_decay=weight_decay,
-            train_backbone=train_backbone,
-            backbone_lr_multiplier=backbone_lr_multiplier,
-        )
-        scheduler = CosineAnnealingLR(optimizer, T_max=max(int(max_epochs), 1))
+            )
+            optimizer = _build_optimizer(
+                components,
+                base_lr=base_lr,
+                weight_decay=weight_decay,
+                train_backbone=train_backbone,
+                backbone_lr_multiplier=backbone_lr_multiplier,
+            )
+            scheduler = CosineAnnealingLR(optimizer, T_max=max(int(max_epochs), 1))
+            _restore_optimizer_scheduler_from_checkpoint(
+                checkpoint=components.checkpoint,
+                optimizer=optimizer,
+                scheduler=scheduler,
+            )
+            start_epoch = int(latest_existing_epoch) + 1
+        else:
+            print(f"  no existing milestones for lambda={lambda_traj:.4f}; starting from Phase B checkpoint.")
+            components = load_components_from_checkpoint(
+                phase_b_checkpoint,
+                device,
+                config_overrides={
+                    "backbone": {"freeze_backbone": not train_backbone},
+                    "training": {
+                        "train_backbone": bool(train_backbone),
+                        "ce_weight": float(ce_weight),
+                        "backbone_lr_multiplier": float(backbone_lr_multiplier),
+                    },
+                },
+            )
+            optimizer = _build_optimizer(
+                components,
+                base_lr=base_lr,
+                weight_decay=weight_decay,
+                train_backbone=train_backbone,
+                backbone_lr_multiplier=backbone_lr_multiplier,
+            )
+            scheduler = CosineAnnealingLR(optimizer, T_max=max(int(max_epochs), 1))
+            start_epoch = 1
+
         criterion = nn.CrossEntropyLoss()
         history: list[dict] = []
-        for epoch_idx in range(1, int(max_epochs) + 1):
+        for epoch_idx in range(int(start_epoch), int(max_epochs) + 1):
             print(
                 f"  [{branch_tag}] lambda={lambda_traj:.4f} | epoch {epoch_idx:>2}/{int(max_epochs)}"
                 f" | running train+val"
@@ -377,6 +433,11 @@ def _run_phase_c_milestone_sweep(
                     "ce_weight": float(ce_weight),
                 }
             )
+            existing_candidate_keys.add((float(lambda_traj), int(epoch_idx)))
+    candidates = sorted(
+        candidates,
+        key=lambda row: (str(row["branch_tag"]), float(row["lambda_traj"]), int(row["epoch"])),
+    )
     manifest_path.write_text(json.dumps(candidates, indent=2), encoding="utf-8")
     print(f"\n[{branch_tag}] Sweep complete. Wrote manifest: {manifest_path.name}")
     return candidates
@@ -540,3 +601,68 @@ def _print_section(title: str) -> None:
     print(f"\n{line}")
     print(title)
     print(line)
+
+
+def _reconstruct_phase_c_candidates(
+    *,
+    output_dir: Path,
+    branch_tag: str,
+    lambda_traj_candidates: list[float] | tuple[float, ...],
+    milestones: list[int],
+) -> list[dict]:
+    expected_paths = _expected_phase_c_paths(
+        output_dir=output_dir,
+        branch_tag=branch_tag,
+        lambda_traj_candidates=lambda_traj_candidates,
+        milestones=milestones,
+    )
+    candidates: list[dict] = []
+    for (lambda_traj, epoch), checkpoint_path in sorted(expected_paths.items(), key=lambda item: (item[0][0], item[0][1])):
+        if not checkpoint_path.exists():
+            continue
+        candidates.append(
+            _candidate_row_from_checkpoint(
+                checkpoint_path=checkpoint_path,
+                branch_tag=branch_tag,
+                lambda_traj=lambda_traj,
+                epoch=epoch,
+            )
+        )
+    return candidates
+
+
+def _candidate_row_from_checkpoint(
+    *,
+    checkpoint_path: Path,
+    branch_tag: str,
+    lambda_traj: float,
+    epoch: int,
+) -> dict:
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    validation = checkpoint.get("validation", {})
+    summary = checkpoint.get("summary", {})
+    return {
+        "branch_tag": str(summary.get("branch_tag", branch_tag)),
+        "lambda_traj": float(summary.get("lambda_traj", lambda_traj)),
+        "epoch": int(summary.get("epoch", epoch)),
+        "checkpoint_path": str(checkpoint_path),
+        "prediction_cosine_mean": float(validation.get("prediction_cosine_mean", 0.0)),
+        "reconstruction_cosine_mean": float(validation.get("reconstruction_cosine_mean", 0.0)),
+        "trajectory_alignment_mean": float(validation.get("trajectory_alignment_mean", 0.0)),
+        "train_backbone": bool(summary.get("train_backbone", False)),
+        "ce_weight": float(summary.get("ce_weight", 0.0)),
+    }
+
+
+def _restore_optimizer_scheduler_from_checkpoint(
+    *,
+    checkpoint: dict,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler._LRScheduler,
+) -> None:
+    optimizer_state = checkpoint.get("optimizer_state")
+    scheduler_state = checkpoint.get("scheduler_state")
+    if optimizer_state is not None:
+        optimizer.load_state_dict(optimizer_state)
+    if scheduler_state is not None:
+        scheduler.load_state_dict(scheduler_state)
