@@ -292,6 +292,55 @@ def test_hard_pair_benchmark_reuses_cached_bundle(tmp_path, monkeypatch):
     assert first["pair_rows"] == second["pair_rows"]
 
 
+def test_selective_hybrid_rebuilds_stale_cached_bundle(tmp_path, monkeypatch):
+    fit_z = torch.tensor(
+        [
+            [[[2.0, 0.0]], [[2.0, 0.0]]],
+            [[[2.1, 0.0]], [[1.9, 0.0]]],
+            [[[0.0, 2.0]], [[0.0, 2.0]]],
+            [[[0.0, 2.1]], [[0.0, 1.9]]],
+        ]
+    )
+    queued = [
+        _make_outputs(fit_z, torch.tensor([0, 0, 1, 1]), torch.zeros(4, 2)),
+        _make_outputs(
+            fit_z.clone(),
+            torch.tensor([0, 0, 1, 1]),
+            torch.tensor([[1.0, 3.0], [1.0, 3.0], [0.2, 3.0], [0.2, 2.9]]),
+        ),
+        _make_outputs(fit_z.clone(), torch.tensor([0, 0, 1, 1]), torch.zeros(4, 2)),
+    ]
+    monkeypatch.setattr(
+        "flow_circuits.evaluation.interpretability_validation.collect_interpretability_outputs",
+        lambda *args, **kwargs: queued.pop(0),
+    )
+    output_path = tmp_path / "phase_c" / "selective_hybrid_correction.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_cache = output_path.parent / "_pair_bundle_cache" / "phase_c_fit4_val4_test4_pairs1_nodes1_c0.1-1.0-10.0.pt"
+    stale_cache.parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"pair_rows": [], "pair_infos": []}, stale_cache)
+
+    result = run_selective_hybrid_correction_experiment(
+        SimpleNamespace(),
+        fit_loader=object(),
+        val_loader=object(),
+        test_loader=object(),
+        device=torch.device("cpu"),
+        checkpoint_tag="phase_c",
+        fit_max_images=4,
+        val_max_images=4,
+        test_max_images=4,
+        top_pairs=1,
+        top_k_nodes=1,
+        output_path=output_path,
+    )
+
+    assert "backbone" in result
+    rebuilt = torch.load(stale_cache, map_location="cpu", weights_only=False)
+    assert "val_outputs" in rebuilt
+    assert "test_outputs" in rebuilt
+
+
 def test_hard_example_audit_wraps_multiclass_and_pair_results(monkeypatch):
     monkeypatch.setattr(
         "flow_circuits.evaluation.hard_pair_correction.run_multiclass_z_probe_audit_experiment",

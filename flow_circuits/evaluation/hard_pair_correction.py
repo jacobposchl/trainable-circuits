@@ -711,7 +711,12 @@ def run_selective_hybrid_correction_experiment(
             "top_node_net_gain": selective["top_node_hybrid"]["net_gain"],
             "full_z_net_gain": selective["full_z_hybrid"]["net_gain"],
         },
-        **selective,
+        "backbone": _public_hybrid_summary(selective["backbone"]),
+        "full_z_hybrid": _public_hybrid_summary(selective["full_z_hybrid"]),
+        "top_node_hybrid": _public_hybrid_summary(selective["top_node_hybrid"]),
+        "margin_threshold": selective["margin_threshold"],
+        "entropy_threshold": selective["entropy_threshold"],
+        "trigger_mode": selective["trigger_mode"],
     }
     _maybe_write_json(result, output_path)
     return result
@@ -861,18 +866,26 @@ def _prepare_hard_pair_bundle(
         c_grid=c_grid,
     )
     if bundle_cache is not None and bundle_cache.exists():
+        cached = torch.load(bundle_cache, map_location="cpu", weights_only=False)
+        if {"pair_rows", "pair_infos", "val_outputs", "test_outputs"}.issubset(cached):
+            tracker.emit(
+                stage="pair_bundle_cache",
+                completed=1,
+                total=1,
+                message="loading cached hard-pair probe bundle",
+            )
+            return {
+                "pair_rows": cached["pair_rows"],
+                "pair_infos": cached["pair_infos"],
+                "val_outputs": cached["val_outputs"],
+                "test_outputs": cached["test_outputs"],
+            }
         tracker.emit(
             stage="pair_bundle_cache",
             completed=1,
             total=1,
-            message="loading cached hard-pair probe bundle",
+            message="rebuilding stale hard-pair probe bundle cache",
         )
-        cached = torch.load(bundle_cache, map_location="cpu", weights_only=False)
-        return {
-            "pair_rows": cached["pair_rows"],
-            "pair_infos": cached["pair_infos"],
-            "test_outputs": test_outputs,
-        }
 
     state_path = _state_path(output_path)
     resume_state = _load_state(state_path) or {}
@@ -921,6 +934,8 @@ def _prepare_hard_pair_bundle(
             {
                 "pair_rows": pair_rows,
                 "pair_infos": pair_infos,
+                "val_outputs": val_outputs,
+                "test_outputs": test_outputs,
             },
             bundle_cache,
         )
@@ -1415,6 +1430,23 @@ def _hybrid_summary_from_predictions(
         "corrected_mask": corrected_mask,
         "harmed_mask": harmed_mask,
         "pair_confidences": pair_confidences,
+    }
+
+
+def _public_hybrid_summary(summary: dict) -> dict:
+    return {
+        key: value
+        for key, value in summary.items()
+        if key
+        not in {
+            "predictions",
+            "probabilities",
+            "trigger_mask",
+            "override_mask",
+            "corrected_mask",
+            "harmed_mask",
+            "pair_confidences",
+        }
     }
 
 
