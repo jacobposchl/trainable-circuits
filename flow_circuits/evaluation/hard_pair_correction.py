@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
     balanced_accuracy_score,
     brier_score_loss,
     f1_score,
@@ -41,11 +42,14 @@ MULTICLASS_PROBE_AUDIT_ID = "multiclass_probe_audit"
 HARD_PAIR_PROBE_BENCHMARK_ID = "hard_pair_probe_benchmark"
 HYBRID_CORRECTION_ID = "hybrid_correction"
 CORRECTION_CASE_STUDIES_ID = "correction_case_studies"
+HARD_EXAMPLE_AUDIT_ID = "hard_example_audit"
+SELECTIVE_HYBRID_CORRECTION_ID = "selective_hybrid_correction"
+CONFIDENCE_AND_CALIBRATION_ID = "confidence_and_calibration"
 
 NB06_EXPERIMENT_IDS = [
-    MULTICLASS_PROBE_AUDIT_ID,
-    HARD_PAIR_PROBE_BENCHMARK_ID,
-    HYBRID_CORRECTION_ID,
+    HARD_EXAMPLE_AUDIT_ID,
+    SELECTIVE_HYBRID_CORRECTION_ID,
+    CONFIDENCE_AND_CALIBRATION_ID,
     CORRECTION_CASE_STUDIES_ID,
 ]
 
@@ -510,6 +514,11 @@ def run_hard_pair_case_study_experiment(
     top_pairs: int = 3,
     top_k_nodes: int = 3,
     exemplar_count: int = 6,
+    trigger_mode: str = "hard_pair_top2_and_low_margin",
+    margin_threshold: float | None = None,
+    margin_quantile: float = 0.25,
+    entropy_threshold: float | None = None,
+    entropy_quantile: float = 0.75,
     n_jobs: int | None = None,
     c_grid: tuple[float, ...] = (0.1, 1.0, 10.0),
     output_path: str | Path | None = None,
@@ -533,16 +542,22 @@ def run_hard_pair_case_study_experiment(
         experiment_id=CORRECTION_CASE_STUDIES_ID,
         progress_callback=progress_callback,
     )
-    full_eval = _evaluate_hybrid_predictions(pair_bundle=pair_bundle, prediction_mode="full_z")
-    top_eval = _evaluate_hybrid_predictions(pair_bundle=pair_bundle, prediction_mode="top_nodes")
+    selective = _evaluate_selective_hybrids(
+        pair_bundle=pair_bundle,
+        trigger_mode=trigger_mode,
+        margin_threshold=margin_threshold,
+        margin_quantile=margin_quantile,
+        entropy_threshold=entropy_threshold,
+        entropy_quantile=entropy_quantile,
+    )
     image_shape = list(pair_bundle["test_outputs"]["images"].shape[-2:])
     grid_size = int(components.config["tokenization"].get("grid_size", 4))
 
     pair_case_studies = [
         _build_pair_case_rows(
             pair_info=pair_info,
-            full_eval=full_eval,
-            top_eval=top_eval,
+            full_eval=selective["full_z_hybrid"],
+            top_eval=selective["top_node_hybrid"],
             test_outputs=pair_bundle["test_outputs"],
             image_shape=image_shape,
             grid_size=grid_size,
@@ -557,8 +572,232 @@ def run_hard_pair_case_study_experiment(
             "n_pairs": int(len(pair_case_studies)),
             "n_corrected_examples": int(sum(len(row["corrected_examples"]) for row in pair_case_studies)),
             "n_harmed_examples": int(sum(len(row["harmed_examples"]) for row in pair_case_studies)),
+            "trigger_mode": trigger_mode,
         },
         "pair_case_studies": pair_case_studies,
+    }
+    _maybe_write_json(result, output_path)
+    return result
+
+
+def run_hard_example_audit_experiment(
+    components: LoadedFlowComponents,
+    fit_loader,
+    val_loader,
+    test_loader,
+    *,
+    device: torch.device,
+    checkpoint_tag: str,
+    fit_max_images: int,
+    val_max_images: int,
+    test_max_images: int,
+    top_pairs: int = 3,
+    top_k_nodes: int = 3,
+    n_jobs: int | None = None,
+    c_grid: tuple[float, ...] = (0.1, 1.0, 10.0),
+    output_path: str | Path | None = None,
+    progress_callback=None,
+) -> dict:
+    multiclass = run_multiclass_z_probe_audit_experiment(
+        components,
+        fit_loader,
+        val_loader,
+        test_loader,
+        device=device,
+        checkpoint_tag=checkpoint_tag,
+        fit_max_images=fit_max_images,
+        val_max_images=val_max_images,
+        test_max_images=test_max_images,
+        n_jobs=n_jobs,
+        c_grid=c_grid,
+        output_path=output_path,
+        progress_callback=progress_callback,
+    )
+    hard_pairs = run_hard_pair_probe_benchmark_experiment(
+        components,
+        fit_loader,
+        val_loader,
+        test_loader,
+        device=device,
+        checkpoint_tag=checkpoint_tag,
+        fit_max_images=fit_max_images,
+        val_max_images=val_max_images,
+        test_max_images=test_max_images,
+        top_pairs=top_pairs,
+        top_k_nodes=top_k_nodes,
+        n_jobs=n_jobs,
+        c_grid=c_grid,
+        output_path=output_path,
+        progress_callback=progress_callback,
+    )
+    result = {
+        "experiment": HARD_EXAMPLE_AUDIT_ID,
+        "checkpoint_tag": checkpoint_tag,
+        "summary": {
+            "global_accuracy": multiclass["summary"]["global_accuracy"],
+            "global_macro_f1": multiclass["summary"]["global_macro_f1"],
+            "mean_backbone_pair_accuracy": hard_pairs["summary"]["mean_backbone_pair_accuracy"],
+            "mean_full_z_probe_accuracy": hard_pairs["summary"]["mean_full_z_probe_accuracy"],
+            "mean_top_node_probe_accuracy": hard_pairs["summary"]["mean_top_node_probe_accuracy"],
+        },
+        "multiclass_probe_audit": multiclass,
+        "hard_pair_probe_benchmark": hard_pairs,
+    }
+    _maybe_write_json(result, output_path)
+    return result
+
+
+def run_selective_hybrid_correction_experiment(
+    components: LoadedFlowComponents,
+    fit_loader,
+    val_loader,
+    test_loader,
+    *,
+    device: torch.device,
+    checkpoint_tag: str,
+    fit_max_images: int,
+    val_max_images: int,
+    test_max_images: int,
+    top_pairs: int = 3,
+    top_k_nodes: int = 3,
+    trigger_mode: str = "hard_pair_top2_and_low_margin",
+    margin_threshold: float | None = None,
+    margin_quantile: float = 0.25,
+    entropy_threshold: float | None = None,
+    entropy_quantile: float = 0.75,
+    n_jobs: int | None = None,
+    c_grid: tuple[float, ...] = (0.1, 1.0, 10.0),
+    output_path: str | Path | None = None,
+    progress_callback=None,
+) -> dict:
+    pair_bundle = _prepare_hard_pair_bundle(
+        components,
+        fit_loader,
+        val_loader,
+        test_loader,
+        device=device,
+        checkpoint_tag=checkpoint_tag,
+        fit_max_images=fit_max_images,
+        val_max_images=val_max_images,
+        test_max_images=test_max_images,
+        top_pairs=top_pairs,
+        top_k_nodes=top_k_nodes,
+        n_jobs=n_jobs,
+        c_grid=c_grid,
+        output_path=output_path,
+        experiment_id=SELECTIVE_HYBRID_CORRECTION_ID,
+        progress_callback=progress_callback,
+    )
+    selective = _evaluate_selective_hybrids(
+        pair_bundle=pair_bundle,
+        trigger_mode=trigger_mode,
+        margin_threshold=margin_threshold,
+        margin_quantile=margin_quantile,
+        entropy_threshold=entropy_threshold,
+        entropy_quantile=entropy_quantile,
+    )
+    result = {
+        "experiment": SELECTIVE_HYBRID_CORRECTION_ID,
+        "checkpoint_tag": checkpoint_tag,
+        "summary": {
+            "trigger_mode": trigger_mode,
+            "backbone_overall_accuracy": selective["backbone"]["overall_accuracy"],
+            "full_z_hybrid_overall_accuracy": selective["full_z_hybrid"]["overall_accuracy"],
+            "top_node_hybrid_overall_accuracy": selective["top_node_hybrid"]["overall_accuracy"],
+            "backbone_trigger_accuracy": selective["backbone"]["trigger_subset_accuracy"],
+            "full_z_hybrid_trigger_accuracy": selective["full_z_hybrid"]["trigger_subset_accuracy"],
+            "top_node_hybrid_trigger_accuracy": selective["top_node_hybrid"]["trigger_subset_accuracy"],
+            "trigger_coverage": selective["top_node_hybrid"]["trigger_coverage"],
+            "top_node_net_gain": selective["top_node_hybrid"]["net_gain"],
+            "full_z_net_gain": selective["full_z_hybrid"]["net_gain"],
+        },
+        **selective,
+    }
+    _maybe_write_json(result, output_path)
+    return result
+
+
+def run_confidence_and_calibration_experiment(
+    components: LoadedFlowComponents,
+    fit_loader,
+    val_loader,
+    test_loader,
+    *,
+    device: torch.device,
+    checkpoint_tag: str,
+    fit_max_images: int,
+    val_max_images: int,
+    test_max_images: int,
+    top_pairs: int = 3,
+    top_k_nodes: int = 3,
+    trigger_mode: str = "hard_pair_top2_and_low_margin",
+    margin_threshold: float | None = None,
+    margin_quantile: float = 0.25,
+    entropy_threshold: float | None = None,
+    entropy_quantile: float = 0.75,
+    n_jobs: int | None = None,
+    c_grid: tuple[float, ...] = (0.1, 1.0, 10.0),
+    output_path: str | Path | None = None,
+    progress_callback=None,
+) -> dict:
+    pair_bundle = _prepare_hard_pair_bundle(
+        components,
+        fit_loader,
+        val_loader,
+        test_loader,
+        device=device,
+        checkpoint_tag=checkpoint_tag,
+        fit_max_images=fit_max_images,
+        val_max_images=val_max_images,
+        test_max_images=test_max_images,
+        top_pairs=top_pairs,
+        top_k_nodes=top_k_nodes,
+        n_jobs=n_jobs,
+        c_grid=c_grid,
+        output_path=output_path,
+        experiment_id=CONFIDENCE_AND_CALIBRATION_ID,
+        progress_callback=progress_callback,
+    )
+    selective = _evaluate_selective_hybrids(
+        pair_bundle=pair_bundle,
+        trigger_mode=trigger_mode,
+        margin_threshold=margin_threshold,
+        margin_quantile=margin_quantile,
+        entropy_threshold=entropy_threshold,
+        entropy_quantile=entropy_quantile,
+    )
+    labels = pair_bundle["test_outputs"]["labels"].numpy()
+    backbone_pred = pair_bundle["test_outputs"]["logits"].argmax(dim=1).numpy()
+    backbone_probs = torch.softmax(pair_bundle["test_outputs"]["logits"], dim=1).cpu().numpy()
+    backbone_wrong = (backbone_pred != labels).astype(int)
+    trigger_mask = selective["trigger_mask"]
+    triggered_wrong = backbone_wrong[trigger_mask]
+    result = {
+        "experiment": CONFIDENCE_AND_CALIBRATION_ID,
+        "checkpoint_tag": checkpoint_tag,
+        "summary": {
+            "trigger_mode": trigger_mode,
+            "backbone_ece": _ece(labels, backbone_probs),
+            "full_z_hybrid_ece": _ece(labels, selective["full_z_hybrid"]["probabilities"]),
+            "top_node_hybrid_ece": _ece(labels, selective["top_node_hybrid"]["probabilities"]),
+            "backbone_log_loss": _safe_log_loss(labels, backbone_probs),
+            "full_z_hybrid_log_loss": _safe_log_loss(labels, selective["full_z_hybrid"]["probabilities"]),
+            "top_node_hybrid_log_loss": _safe_log_loss(labels, selective["top_node_hybrid"]["probabilities"]),
+            "backbone_brier": _multiclass_brier(labels, backbone_probs),
+            "full_z_hybrid_brier": _multiclass_brier(labels, selective["full_z_hybrid"]["probabilities"]),
+            "top_node_hybrid_brier": _multiclass_brier(labels, selective["top_node_hybrid"]["probabilities"]),
+        },
+        "overall": {
+            "backbone": _confidence_summary(labels, backbone_probs, backbone_pred),
+            "full_z_hybrid": _confidence_summary(labels, selective["full_z_hybrid"]["probabilities"], selective["full_z_hybrid"]["predictions"]),
+            "top_node_hybrid": _confidence_summary(labels, selective["top_node_hybrid"]["probabilities"], selective["top_node_hybrid"]["predictions"]),
+        },
+        "triggered_subset": {
+            "count": int(trigger_mask.sum()),
+            "backbone_error_detection": _error_detection_summary(triggered_wrong, 1.0 - backbone_probs[trigger_mask].max(axis=1)),
+            "full_z_probe_error_detection": _error_detection_summary(triggered_wrong, 1.0 - selective["full_z_hybrid"]["pair_confidences"][trigger_mask]),
+            "top_node_probe_error_detection": _error_detection_summary(triggered_wrong, 1.0 - selective["top_node_hybrid"]["pair_confidences"][trigger_mask]),
+        },
     }
     _maybe_write_json(result, output_path)
     return result
@@ -688,6 +927,7 @@ def _prepare_hard_pair_bundle(
     return {
         "pair_rows": pair_rows,
         "pair_infos": pair_infos,
+        "val_outputs": val_outputs,
         "test_outputs": test_outputs,
     }
 
@@ -957,6 +1197,227 @@ def _evaluate_hybrid_predictions(*, pair_bundle: dict, prediction_mode: str) -> 
     }
 
 
+def _evaluate_selective_hybrids(
+    *,
+    pair_bundle: dict,
+    trigger_mode: str,
+    margin_threshold: float | None,
+    margin_quantile: float,
+    entropy_threshold: float | None,
+    entropy_quantile: float,
+) -> dict:
+    if trigger_mode not in {
+        "hard_pair_top2",
+        "hard_pair_top2_and_low_margin",
+        "hard_pair_top2_and_high_entropy",
+    }:
+        raise ValueError(f"Unsupported trigger_mode: {trigger_mode}")
+
+    test_outputs = pair_bundle["test_outputs"]
+    val_outputs = pair_bundle["val_outputs"]
+    test_logits = test_outputs["logits"]
+    test_probs = torch.softmax(test_logits, dim=1).cpu().numpy()
+    val_probs = torch.softmax(val_outputs["logits"], dim=1).cpu().numpy()
+    test_labels = test_outputs["labels"].numpy()
+    base_predictions = test_probs.argmax(axis=1)
+
+    test_margins = _top1_margin(test_probs)
+    val_margins = _top1_margin(val_probs)
+    test_entropy = _entropy(test_probs)
+    val_entropy = _entropy(val_probs)
+    margin_cutoff = float(margin_threshold) if margin_threshold is not None else float(np.quantile(val_margins, margin_quantile))
+    entropy_cutoff = float(entropy_threshold) if entropy_threshold is not None else float(np.quantile(val_entropy, entropy_quantile))
+
+    results = {
+        "margin_threshold": margin_cutoff,
+        "entropy_threshold": entropy_cutoff,
+        "trigger_mode": trigger_mode,
+    }
+
+    for prediction_mode, key in (("full_z", "full_z_hybrid"), ("top_nodes", "top_node_hybrid")):
+        hybrid = _evaluate_selective_single_mode(
+            pair_bundle=pair_bundle,
+            prediction_mode=prediction_mode,
+            trigger_mode=trigger_mode,
+            margin_cutoff=margin_cutoff,
+            entropy_cutoff=entropy_cutoff,
+            test_margins=test_margins,
+            test_entropy=test_entropy,
+        )
+        results[key] = hybrid
+
+    trigger_mask = results["top_node_hybrid"]["trigger_mask"]
+    backbone_per_pair_rows = [
+        {
+            "left_label": row["left_label"],
+            "left_label_name": row["left_label_name"],
+            "right_label": row["right_label"],
+            "right_label_name": row["right_label_name"],
+            "trigger_count": row["trigger_count"],
+            "overrides": 0,
+            "corrected": 0,
+            "harmed": 0,
+            "backbone_subset_accuracy": row["backbone_subset_accuracy"],
+            "hybrid_subset_accuracy": row["backbone_subset_accuracy"],
+        }
+        for row in results["top_node_hybrid"]["per_pair_rows"]
+    ]
+    results["backbone"] = _hybrid_summary_from_predictions(
+        labels=test_labels,
+        predictions=base_predictions,
+        probabilities=test_probs,
+        trigger_mask=trigger_mask,
+        overrides_mask=np.zeros(test_labels.shape[0], dtype=bool),
+        corrected_mask=np.zeros(test_labels.shape[0], dtype=bool),
+        harmed_mask=np.zeros(test_labels.shape[0], dtype=bool),
+        per_pair_rows=backbone_per_pair_rows,
+        pair_confidences=test_probs.max(axis=1),
+    )
+    results["trigger_mask"] = trigger_mask
+    return results
+
+
+def _evaluate_selective_single_mode(
+    *,
+    pair_bundle: dict,
+    prediction_mode: str,
+    trigger_mode: str,
+    margin_cutoff: float,
+    entropy_cutoff: float,
+    test_margins: np.ndarray,
+    test_entropy: np.ndarray,
+) -> dict:
+    test_outputs = pair_bundle["test_outputs"]
+    logits = test_outputs["logits"]
+    labels = test_outputs["labels"].numpy()
+    probabilities = torch.softmax(logits, dim=1).cpu().numpy()
+    predictions = probabilities.argmax(axis=1)
+    top2_indices = np.argsort(probabilities, axis=1)[:, -2:][:, ::-1]
+    test_z = test_outputs["z"].numpy()
+
+    hybrid_probs = probabilities.copy()
+    hybrid_preds = predictions.copy()
+    trigger_mask = np.zeros(labels.shape[0], dtype=bool)
+    overrides_mask = np.zeros(labels.shape[0], dtype=bool)
+    corrected_mask = np.zeros(labels.shape[0], dtype=bool)
+    harmed_mask = np.zeros(labels.shape[0], dtype=bool)
+    pair_confidences = np.ones(labels.shape[0], dtype=np.float64)
+    per_pair_rows = []
+
+    for pair_info in pair_bundle["pair_infos"]:
+        left_label = int(pair_info["left_label"])
+        right_label = int(pair_info["right_label"])
+        pair_key = {left_label, right_label}
+        pair_top2 = np.array([{int(row[0]), int(row[1])} == pair_key for row in top2_indices.tolist()], dtype=bool)
+        if trigger_mode == "hard_pair_top2":
+            pair_trigger = pair_top2
+        elif trigger_mode == "hard_pair_top2_and_low_margin":
+            pair_trigger = pair_top2 & (test_margins <= margin_cutoff)
+        else:
+            pair_trigger = pair_top2 & (test_entropy >= entropy_cutoff)
+        trigger_mask |= pair_trigger
+        if not np.any(pair_trigger):
+            per_pair_rows.append(_empty_pair_hybrid_row(pair_info))
+            continue
+
+        if prediction_mode == "full_z":
+            model = pair_info["full_model"]
+            features = _global_probe_features(test_z[pair_trigger])
+        else:
+            model = pair_info["top_node_model"]
+            features = _top_node_features(test_z[pair_trigger], pair_info["selected_top_nodes"])
+        pair_prob_right = _predict_binary_probabilities(model, features)
+        pair_indices = np.nonzero(pair_trigger)[0]
+        pair_overrides = 0
+        pair_corrected = 0
+        pair_harmed = 0
+        for local_idx, row_idx in enumerate(pair_indices.tolist()):
+            right_prob = float(pair_prob_right[local_idx])
+            pair_confidences[row_idx] = max(right_prob, 1.0 - right_prob)
+            pair_mass = hybrid_probs[row_idx, left_label] + hybrid_probs[row_idx, right_label]
+            hybrid_probs[row_idx, left_label] = pair_mass * (1.0 - right_prob)
+            hybrid_probs[row_idx, right_label] = pair_mass * right_prob
+            new_pred = int(right_label if right_prob >= 0.5 else left_label)
+            old_pred = int(predictions[row_idx])
+            hybrid_preds[row_idx] = new_pred
+            if new_pred != old_pred:
+                overrides_mask[row_idx] = True
+                pair_overrides += 1
+                if old_pred != int(labels[row_idx]) and new_pred == int(labels[row_idx]):
+                    corrected_mask[row_idx] = True
+                    pair_corrected += 1
+                elif old_pred == int(labels[row_idx]) and new_pred != int(labels[row_idx]):
+                    harmed_mask[row_idx] = True
+                    pair_harmed += 1
+        pair_subset_backbone = _classification_metrics(labels[pair_trigger], predictions[pair_trigger], probabilities[pair_trigger])
+        pair_subset_hybrid = _classification_metrics(labels[pair_trigger], hybrid_preds[pair_trigger], hybrid_probs[pair_trigger])
+        per_pair_rows.append(
+            {
+                "left_label": left_label,
+                "left_label_name": pair_info["left_label_name"],
+                "right_label": right_label,
+                "right_label_name": pair_info["right_label_name"],
+                "trigger_count": int(pair_trigger.sum()),
+                "overrides": int(pair_overrides),
+                "corrected": int(pair_corrected),
+                "harmed": int(pair_harmed),
+                "backbone_subset_accuracy": pair_subset_backbone["accuracy"],
+                "hybrid_subset_accuracy": pair_subset_hybrid["accuracy"],
+            }
+        )
+
+    return _hybrid_summary_from_predictions(
+        labels=labels,
+        predictions=hybrid_preds,
+        probabilities=hybrid_probs,
+        trigger_mask=trigger_mask,
+        overrides_mask=overrides_mask,
+        corrected_mask=corrected_mask,
+        harmed_mask=harmed_mask,
+        per_pair_rows=per_pair_rows,
+        pair_confidences=pair_confidences,
+    )
+
+
+def _hybrid_summary_from_predictions(
+    *,
+    labels: np.ndarray,
+    predictions: np.ndarray,
+    probabilities: np.ndarray,
+    trigger_mask: np.ndarray,
+    overrides_mask: np.ndarray,
+    corrected_mask: np.ndarray,
+    harmed_mask: np.ndarray,
+    per_pair_rows: list[dict],
+    pair_confidences: np.ndarray,
+) -> dict:
+    overall = _classification_metrics(labels, predictions, probabilities)
+    trigger = _classification_metrics(labels[trigger_mask], predictions[trigger_mask], probabilities[trigger_mask])
+    return {
+        "overall_accuracy": overall["accuracy"],
+        "overall_macro_f1": overall["macro_f1"],
+        "overall_log_loss": overall["log_loss"],
+        "trigger_subset_count": int(trigger_mask.sum()),
+        "trigger_subset_accuracy": trigger["accuracy"],
+        "trigger_subset_macro_f1": trigger["macro_f1"],
+        "trigger_coverage": float(trigger_mask.sum() / max(labels.shape[0], 1)),
+        "override_coverage": float(overrides_mask.sum() / max(trigger_mask.sum(), 1)),
+        "correction_precision": float(corrected_mask.sum() / max(overrides_mask.sum(), 1)),
+        "harm_rate": float(harmed_mask.sum() / max(overrides_mask.sum(), 1)),
+        "net_gain": int(corrected_mask.sum() - harmed_mask.sum()),
+        "gain_per_100_triggered": float(100.0 * (corrected_mask.sum() - harmed_mask.sum()) / max(trigger_mask.sum(), 1)),
+        "pairwise_win_rate_over_backbone": float(np.mean([row["hybrid_subset_accuracy"] > row["backbone_subset_accuracy"] for row in per_pair_rows])) if per_pair_rows else 0.0,
+        "per_pair_rows": per_pair_rows,
+        "predictions": predictions,
+        "probabilities": probabilities,
+        "trigger_mask": trigger_mask,
+        "override_mask": overrides_mask,
+        "corrected_mask": corrected_mask,
+        "harmed_mask": harmed_mask,
+        "pair_confidences": pair_confidences,
+    }
+
+
 def _build_pair_case_rows(
     *,
     pair_info: dict,
@@ -972,7 +1433,8 @@ def _build_pair_case_rows(
     probs = torch.softmax(test_outputs["logits"], dim=1).cpu().numpy()
     top2_indices = np.argsort(probs, axis=1)[:, -2:][:, ::-1]
     pair_key = {left_label, right_label}
-    trigger_mask = np.array([{int(row[0]), int(row[1])} == pair_key for row in top2_indices.tolist()], dtype=bool)
+    pair_top2_mask = np.array([{int(row[0]), int(row[1])} == pair_key for row in top2_indices.tolist()], dtype=bool)
+    trigger_mask = pair_top2_mask & top_eval["trigger_mask"]
     trigger_indices = np.nonzero(trigger_mask)[0]
 
     def _collect(mask: np.ndarray) -> list[dict]:
@@ -1039,12 +1501,12 @@ def _case_example(
         "backbone_pred_name": _label_name(int(logits.argmax(dim=1).item())),
         "backbone_top2": [int(value) for value in backbone_top2],
         "backbone_top2_names": [_label_name(int(value)) for value in backbone_top2],
-        "full_z_hybrid_pred": int(full_eval["hybrid_predictions"][row_idx]),
-        "full_z_hybrid_pred_name": _label_name(int(full_eval["hybrid_predictions"][row_idx])),
-        "top_node_hybrid_pred": int(top_eval["hybrid_predictions"][row_idx]),
-        "top_node_hybrid_pred_name": _label_name(int(top_eval["hybrid_predictions"][row_idx])),
+        "full_z_hybrid_pred": int(full_eval["predictions"][row_idx]),
+        "full_z_hybrid_pred_name": _label_name(int(full_eval["predictions"][row_idx])),
+        "top_node_hybrid_pred": int(top_eval["predictions"][row_idx]),
+        "top_node_hybrid_pred_name": _label_name(int(top_eval["predictions"][row_idx])),
         "trigger_pair_name": f"{pair_info['left_label_name']} vs {pair_info['right_label_name']}",
-        "pairwise_probe_choice": _label_name(int(top_eval["hybrid_predictions"][row_idx])),
+        "pairwise_probe_choice": _label_name(int(top_eval["predictions"][row_idx])),
         "backbone_margin": float(_margin(logits).item()),
         "overlay": overlay,
     }
@@ -1132,6 +1594,87 @@ def _safe_binary_auroc(labels: np.ndarray, probabilities: np.ndarray) -> float:
     if labels.size == 0 or len(np.unique(labels)) < 2:
         return 0.0
     return float(roc_auc_score(labels, probabilities))
+
+
+def _safe_average_precision(labels: np.ndarray, scores: np.ndarray) -> float:
+    if labels.size == 0 or len(np.unique(labels)) < 2:
+        return 0.0
+    return float(average_precision_score(labels, scores))
+
+
+def _top1_margin(probabilities: np.ndarray) -> np.ndarray:
+    if probabilities.ndim != 2 or probabilities.shape[1] < 2:
+        return np.zeros(probabilities.shape[0], dtype=np.float64)
+    top2 = np.sort(probabilities, axis=1)[:, -2:]
+    return (top2[:, 1] - top2[:, 0]).astype(np.float64)
+
+
+def _entropy(probabilities: np.ndarray) -> np.ndarray:
+    clipped = np.clip(probabilities, 1e-12, 1.0)
+    return (-np.sum(clipped * np.log(clipped), axis=1)).astype(np.float64)
+
+
+def _ece(labels: np.ndarray, probabilities: np.ndarray, *, n_bins: int = 10) -> float:
+    if labels.size == 0 or probabilities.size == 0:
+        return 0.0
+    confidences = probabilities.max(axis=1)
+    predictions = probabilities.argmax(axis=1)
+    correctness = (predictions == labels).astype(np.float64)
+    bins = np.linspace(0.0, 1.0, int(n_bins) + 1)
+    ece = 0.0
+    for lower, upper in zip(bins[:-1], bins[1:]):
+        if upper == 1.0:
+            mask = (confidences >= lower) & (confidences <= upper)
+        else:
+            mask = (confidences >= lower) & (confidences < upper)
+        if not np.any(mask):
+            continue
+        bin_conf = float(confidences[mask].mean())
+        bin_acc = float(correctness[mask].mean())
+        ece += float(mask.mean()) * abs(bin_acc - bin_conf)
+    return float(ece)
+
+
+def _multiclass_brier(labels: np.ndarray, probabilities: np.ndarray) -> float:
+    if labels.size == 0 or probabilities.size == 0:
+        return 0.0
+    one_hot = np.zeros_like(probabilities)
+    one_hot[np.arange(labels.shape[0]), labels.astype(int)] = 1.0
+    return float(np.mean(np.sum((probabilities - one_hot) ** 2, axis=1)))
+
+
+def _confidence_summary(labels: np.ndarray, probabilities: np.ndarray, predictions: np.ndarray) -> dict:
+    confidences = probabilities.max(axis=1) if probabilities.size else np.zeros(labels.shape[0], dtype=np.float64)
+    correctness = (predictions == labels).astype(np.float64) if labels.size else np.zeros(0, dtype=np.float64)
+    correct_conf = confidences[correctness == 1]
+    wrong_conf = confidences[correctness == 0]
+    return {
+        "accuracy": float(correctness.mean()) if correctness.size else 0.0,
+        "mean_confidence": float(confidences.mean()) if confidences.size else 0.0,
+        "mean_correct_confidence": float(correct_conf.mean()) if correct_conf.size else 0.0,
+        "mean_wrong_confidence": float(wrong_conf.mean()) if wrong_conf.size else 0.0,
+        "ece": _ece(labels, probabilities),
+        "log_loss": _safe_log_loss(labels, probabilities),
+        "brier": _multiclass_brier(labels, probabilities),
+    }
+
+
+def _error_detection_summary(error_labels: np.ndarray, uncertainty_scores: np.ndarray) -> dict:
+    if error_labels.size == 0:
+        return {
+            "count": 0,
+            "error_rate": 0.0,
+            "auroc": 0.0,
+            "auprc": 0.0,
+            "mean_uncertainty": 0.0,
+        }
+    return {
+        "count": int(error_labels.shape[0]),
+        "error_rate": float(error_labels.mean()),
+        "auroc": _safe_binary_auroc(error_labels, uncertainty_scores),
+        "auprc": _safe_average_precision(error_labels, uncertainty_scores),
+        "mean_uncertainty": float(uncertainty_scores.mean()) if uncertainty_scores.size else 0.0,
+    }
 
 
 def _empty_pair_hybrid_row(pair_info: dict) -> dict:

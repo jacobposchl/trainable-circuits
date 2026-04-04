@@ -252,7 +252,7 @@ Treat these as characterization, not gatekeeping:
 5. Run `nb03_recurring_motif_core_validation.ipynb`
 6. Run `nb04_motif_extended_characterization.ipynb` if you want the broader motif diagnostics
 7. Run `nb05_motif_visual_interpretability_and_probe_analysis.ipynb` to inspect motifs and probe-readable semantics directly
-8. Run `nb06_hard_pair_correction_from_z.ipynb` if you want to test whether `z` yields actionable correction signal for the backbone's hardest pairs
+8. Run `nb06_hard_pair_correction_from_z.ipynb` if you want a Phase-C-only selective-correction readout for hard examples, confidence quality, and actionable hard-pair support from `z`
 9. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the aligned representation is promising
 
 ## Operational Notes

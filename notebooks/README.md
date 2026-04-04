@@ -28,7 +28,7 @@ Current notebook roles:
 - `nb03`: recurring motif discovery and the most decision-driving motif validation experiments
 - `nb04`: extended motif characterization, Phase B vs Phase C motif matching, and motif transfer/topology analysis
 - `nb05`: image-first motif interpretation, intervention case studies, and linear-probe semantics/error/confusion analysis
-- `nb06`: hard-pair probe benchmarking and hybrid correction from `z`
+- `nb06`: Phase-C-only selective correction, confidence, and hard-example auditing from `z`
 
 Each notebook should not:
 

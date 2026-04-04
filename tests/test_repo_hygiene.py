@@ -113,7 +113,6 @@ def test_notebooks_have_expected_structure_and_compilable_code_cells():
             "RUN_MODE",
             "CONFIG_NAME",
             "EXPERIMENTS",
-            "PHASE_B_CHECKPOINT",
             "PHASE_C_CHECKPOINT",
             "OUTPUT_DIR",
             "FORCE_RERUN",
@@ -225,16 +224,15 @@ def test_nb05_requires_nb03_artifacts_and_uses_interpretability_package_apis():
     assert "flow-train" not in all_code
 
 
-def test_nb06_requires_both_checkpoints_and_uses_hard_pair_package_apis():
+def test_nb06_requires_phase_c_checkpoint_and_uses_selective_hard_pair_package_apis():
     data = json.loads((NOTEBOOK_DIR / "nb06_hard_pair_correction_from_z.ipynb").read_text(encoding="utf-8"))
     all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
 
-    assert "phase_b.pt" in all_code
     assert "phase_c.pt" in all_code
     assert "Missing required checkpoint" in all_code
-    assert "run_multiclass_z_probe_audit_experiment" in all_code
-    assert "run_hard_pair_probe_benchmark_experiment" in all_code
-    assert "run_hard_pair_hybrid_correction_experiment" in all_code
+    assert "run_hard_example_audit_experiment" in all_code
+    assert "run_selective_hybrid_correction_experiment" in all_code
+    assert "run_confidence_and_calibration_experiment" in all_code
     assert "run_hard_pair_case_study_experiment" in all_code
     assert "collect_interpretability_outputs" in all_code
     assert "flow-train" not in all_code
@@ -332,9 +330,9 @@ def test_nb06_exposes_exact_experiment_selector_and_cache_controls():
     assert "nb06_hard_pair_correction_from_z" in all_code
     assert "_run_or_load" in helper_source
     for experiment_id in (
-        "multiclass_probe_audit",
-        "hard_pair_probe_benchmark",
-        "hybrid_correction",
+        "hard_example_audit",
+        "selective_hybrid_correction",
+        "confidence_and_calibration",
         "correction_case_studies",
     ):
         assert experiment_id in all_code
