@@ -14,6 +14,7 @@ EXPECTED_NOTEBOOKS = {
     "nb04_motif_extended_characterization.ipynb",
     "nb05_motif_visual_interpretability_and_probe_analysis.ipynb",
     "nb06_hard_pair_correction_from_z.ipynb",
+    "nb07_phase_c_corruption_selective_correction.ipynb",
 }
 LEGACY_NOTEBOOKS = {
     "nb01_training_and_validation.ipynb",
@@ -110,6 +111,14 @@ def test_notebooks_have_expected_structure_and_compilable_code_cells():
             "FORCE_RERUN",
         },
         "nb06_hard_pair_correction_from_z.ipynb": {
+            "RUN_MODE",
+            "CONFIG_NAME",
+            "EXPERIMENTS",
+            "PHASE_C_CHECKPOINT",
+            "OUTPUT_DIR",
+            "FORCE_RERUN",
+        },
+        "nb07_phase_c_corruption_selective_correction.ipynb": {
             "RUN_MODE",
             "CONFIG_NAME",
             "EXPERIMENTS",
@@ -238,6 +247,18 @@ def test_nb06_requires_phase_c_checkpoint_and_uses_selective_hard_pair_package_a
     assert "flow-train" not in all_code
 
 
+def test_nb07_requires_phase_c_checkpoint_and_uses_corruption_package_apis():
+    data = json.loads((NOTEBOOK_DIR / "nb07_phase_c_corruption_selective_correction.ipynb").read_text(encoding="utf-8"))
+    all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
+
+    assert "phase_c.pt" in all_code
+    assert "Missing required checkpoint" in all_code
+    assert "run_corruption_sweep_experiment" in all_code
+    assert "run_top_node_subset_sweep_experiment" in all_code
+    assert "CIFAR10_CORRUPTION_NAMES" in all_code
+    assert "flow-train" not in all_code
+
+
 def test_nb02_exposes_exact_experiment_selector_and_cache_controls():
     data = json.loads((NOTEBOOK_DIR / "nb02_efficient_representation_and_circuit_validation.ipynb").read_text(encoding="utf-8"))
     config_source = "".join(data["cells"][4]["source"])
@@ -334,6 +355,24 @@ def test_nb06_exposes_exact_experiment_selector_and_cache_controls():
         "selective_hybrid_correction",
         "confidence_and_calibration",
         "correction_case_studies",
+    ):
+        assert experiment_id in all_code
+
+
+def test_nb07_exposes_exact_experiment_selector_and_cache_controls():
+    data = json.loads((NOTEBOOK_DIR / "nb07_phase_c_corruption_selective_correction.ipynb").read_text(encoding="utf-8"))
+    config_source = "".join(data["cells"][4]["source"])
+    helper_source = "".join(data["cells"][5]["source"])
+    all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
+
+    assert 'EXPERIMENTS = "all"' in config_source
+    assert "FORCE_RERUN = False" in config_source
+    assert "NB07_EXPERIMENT_IDS" in all_code
+    assert "nb07_phase_c_corruption_selective_correction" in all_code
+    assert "_run_or_load" in helper_source
+    for experiment_id in (
+        "corruption_sweep",
+        "top_node_subset_sweep",
     ):
         assert experiment_id in all_code
 

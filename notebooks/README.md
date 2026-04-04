@@ -10,6 +10,7 @@ The notebooks in this repo are analysis and orchestration surfaces, not the prim
 - `nb04_motif_extended_characterization.ipynb`
 - `nb05_motif_visual_interpretability_and_probe_analysis.ipynb`
 - `nb06_hard_pair_correction_from_z.ipynb`
+- `nb07_phase_c_corruption_selective_correction.ipynb`
 
 ## Intended Role
 
@@ -29,6 +30,7 @@ Current notebook roles:
 - `nb04`: extended motif characterization, Phase B vs Phase C motif matching, and motif transfer/topology analysis
 - `nb05`: image-first motif interpretation, intervention case studies, and linear-probe semantics/error/confusion analysis
 - `nb06`: Phase-C-only selective correction, confidence, and hard-example auditing from `z`
+- `nb07`: Phase-C-only corruption stress testing with backbone, full-`z`, and top-node-subset selective correction
 
 Each notebook should not:
 

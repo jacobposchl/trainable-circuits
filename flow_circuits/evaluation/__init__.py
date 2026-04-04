@@ -41,11 +41,17 @@ from flow_circuits.evaluation.hard_pair_correction import (
     run_multiclass_z_probe_audit_experiment,
     run_selective_hybrid_correction_experiment,
 )
+from flow_circuits.evaluation.corruption_selective_correction import (
+    NB07_EXPERIMENT_IDS,
+    run_corruption_sweep_experiment,
+    run_top_node_subset_sweep_experiment,
+)
 
 __all__ = [
     "BaselineComparison",
     "NB05_EXPERIMENT_IDS",
     "NB06_EXPERIMENT_IDS",
+    "NB07_EXPERIMENT_IDS",
     "CORE_MOTIF_EXPERIMENT_IDS",
     "ConfirmatoryCheck",
     "EXTENDED_MOTIF_EXPERIMENT_IDS",
@@ -78,4 +84,6 @@ __all__ = [
     "run_hard_pair_probe_benchmark_experiment",
     "run_multiclass_z_probe_audit_experiment",
     "run_selective_hybrid_correction_experiment",
+    "run_corruption_sweep_experiment",
+    "run_top_node_subset_sweep_experiment",
 ]

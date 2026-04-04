@@ -26,6 +26,7 @@ These stages map onto the current notebook suite:
 - `nb04_motif_extended_characterization.ipynb`
 - `nb05_motif_visual_interpretability_and_probe_analysis.ipynb`
 - `nb06_hard_pair_correction_from_z.ipynb`
+- `nb07_phase_c_corruption_selective_correction.ipynb`
 
 Each notebook is designed for Google Colab. The setup cell:
 
@@ -220,6 +221,15 @@ Use this notebook to:
 - test whether pairwise `z` probes improve the frozen backbone when used as top-2 tie-breakers
 - inspect corrected and harmed examples with top-node overlays
 
+### Notebook 7: Phase-C Corruption Selective Correction
+
+Use this notebook to:
+
+- stress-test `phase_c.pt` on a deterministic CIFAR-10 corruption suite
+- compare backbone, backbone + full-`z`, and backbone + top-node-subset selective correction in the same experiment cells
+- inspect whether `z` becomes more useful as corruption severity increases
+- sweep the size of the top-node subset to test whether useful signal is concentrated or distributed
+
 ## Interpreting Outputs
 
 ### Confirmatory Analyses
@@ -253,7 +263,8 @@ Treat these as characterization, not gatekeeping:
 6. Run `nb04_motif_extended_characterization.ipynb` if you want the broader motif diagnostics
 7. Run `nb05_motif_visual_interpretability_and_probe_analysis.ipynb` to inspect motifs and probe-readable semantics directly
 8. Run `nb06_hard_pair_correction_from_z.ipynb` if you want a Phase-C-only selective-correction readout for hard examples, confidence quality, and actionable hard-pair support from `z`
-9. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the aligned representation is promising
+9. Run `nb07_phase_c_corruption_selective_correction.ipynb` if you want to test whether the same Phase-C correction signal becomes more useful under corruption stress
+10. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the aligned representation is promising
 
 ## Operational Notes
 
