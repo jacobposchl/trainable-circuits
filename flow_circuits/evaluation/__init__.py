@@ -22,9 +22,19 @@ from flow_circuits.evaluation.motif_validation import (
     run_motif_topology_experiment,
     run_motif_transfer_stability_experiment,
 )
+from flow_circuits.evaluation.interpretability_validation import (
+    NB05_EXPERIMENT_IDS,
+    run_linear_probe_suite_experiment,
+    run_motif_case_study_experiment,
+    run_motif_visual_report_experiment,
+    run_phase_motif_comparison_experiment,
+    run_probe_confusion_analysis_experiment,
+    run_probe_error_analysis_experiment,
+)
 
 __all__ = [
     "BaselineComparison",
+    "NB05_EXPERIMENT_IDS",
     "CORE_MOTIF_EXPERIMENT_IDS",
     "ConfirmatoryCheck",
     "EXTENDED_MOTIF_EXPERIMENT_IDS",
@@ -44,4 +54,10 @@ __all__ = [
     "run_motif_predictiveness_experiment",
     "run_motif_topology_experiment",
     "run_motif_transfer_stability_experiment",
+    "run_linear_probe_suite_experiment",
+    "run_motif_case_study_experiment",
+    "run_motif_visual_report_experiment",
+    "run_phase_motif_comparison_experiment",
+    "run_probe_confusion_analysis_experiment",
+    "run_probe_error_analysis_experiment",
 ]

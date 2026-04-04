@@ -12,6 +12,7 @@ EXPECTED_NOTEBOOKS = {
     "nb02_efficient_representation_and_circuit_validation.ipynb",
     "nb03_recurring_motif_core_validation.ipynb",
     "nb04_motif_extended_characterization.ipynb",
+    "nb05_motif_visual_interpretability_and_probe_analysis.ipynb",
 }
 LEGACY_NOTEBOOKS = {
     "nb01_training_and_validation.ipynb",
@@ -93,6 +94,17 @@ def test_notebooks_have_expected_structure_and_compilable_code_cells():
             "PHASE_B_CHECKPOINT",
             "PHASE_C_CHECKPOINT",
             "NB03_OUTPUT_DIR",
+            "OUTPUT_DIR",
+            "FORCE_RERUN",
+        },
+        "nb05_motif_visual_interpretability_and_probe_analysis.ipynb": {
+            "RUN_MODE",
+            "CONFIG_NAME",
+            "EXPERIMENTS",
+            "PHASE_B_CHECKPOINT",
+            "PHASE_C_CHECKPOINT",
+            "NB03_OUTPUT_DIR",
+            "NB04_OUTPUT_DIR",
             "OUTPUT_DIR",
             "FORCE_RERUN",
         },
@@ -185,6 +197,24 @@ def test_nb04_requires_nb03_artifacts_and_never_retrains():
     assert "flow-train" not in all_code
 
 
+def test_nb05_requires_nb03_artifacts_and_uses_interpretability_package_apis():
+    data = json.loads((NOTEBOOK_DIR / "nb05_motif_visual_interpretability_and_probe_analysis.ipynb").read_text(encoding="utf-8"))
+    all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
+
+    assert "phase_b.pt" in all_code
+    assert "phase_c.pt" in all_code
+    assert "Missing required motif artifact from nb03" in all_code
+    assert "run_motif_visual_report_experiment" in all_code
+    assert "run_phase_motif_comparison_experiment" in all_code
+    assert "run_motif_case_study_experiment" in all_code
+    assert "run_linear_probe_suite_experiment" in all_code
+    assert "run_probe_confusion_analysis_experiment" in all_code
+    assert "run_probe_error_analysis_experiment" in all_code
+    assert "collect_interpretability_outputs" in all_code
+    assert "discover_motif_families" not in all_code
+    assert "flow-train" not in all_code
+
+
 def test_nb02_exposes_exact_experiment_selector_and_cache_controls():
     data = json.loads((NOTEBOOK_DIR / "nb02_efficient_representation_and_circuit_validation.ipynb").read_text(encoding="utf-8"))
     config_source = "".join(data["cells"][4]["source"])
@@ -241,6 +271,28 @@ def test_nb03_and_nb04_expose_exact_experiment_selectors_and_cache_controls():
         assert "_cache_path" in helper_source
         for experiment_id in experiment_ids:
             assert experiment_id in all_code
+
+
+def test_nb05_exposes_exact_experiment_selector_and_cache_controls():
+    data = json.loads((NOTEBOOK_DIR / "nb05_motif_visual_interpretability_and_probe_analysis.ipynb").read_text(encoding="utf-8"))
+    config_source = "".join(data["cells"][4]["source"])
+    helper_source = "".join(data["cells"][5]["source"])
+    all_code = "\n".join("".join(cell["source"]) for cell in data["cells"] if cell["cell_type"] == "code")
+
+    assert 'EXPERIMENTS = "all"' in config_source
+    assert "FORCE_RERUN = False" in config_source
+    assert "NB05_EXPERIMENT_IDS" in all_code
+    assert "nb05_motif_visual_interpretability_and_probe_analysis" in all_code
+    assert "_cache_path" in helper_source
+    for experiment_id in (
+        "motif_reports",
+        "phase_comparison",
+        "intervention_cases",
+        "class_probe_suite",
+        "confusion_analysis",
+        "error_analysis",
+    ):
+        assert experiment_id in all_code
 
 
 def test_nb02_uses_package_apis_and_progress_callbacks_not_heartbeats():

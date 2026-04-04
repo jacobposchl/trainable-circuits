@@ -332,6 +332,49 @@ def collect_intervention_outputs(
     return _concatenate_output_tensors(outputs, max_images=max_images)
 
 
+def collect_interpretability_outputs(
+    components: LoadedFlowComponents,
+    loader,
+    *,
+    device: torch.device,
+    max_images: int | None = None,
+    progress_callback=None,
+) -> dict[str, torch.Tensor]:
+    outputs = {
+        "z": [],
+        "future_descriptors": [],
+        "images": [],
+        "logits": [],
+        "labels": [],
+        "indices": [],
+    }
+    seen = 0
+    total_batches = _infer_total_batches(loader, components, max_images=max_images)
+    with torch.no_grad():
+        for batch_idx, (images, labels, indices) in enumerate(loader, start=1):
+            device_images = images.to(device)
+            observations = components.observer(device_images)
+            tokenized = components.tokenizer(observations)
+            z, _ = components.encoder(tokenized.token_inputs)
+            outputs["z"].append(z.cpu())
+            outputs["future_descriptors"].append(tokenized.future_descriptors.cpu())
+            outputs["images"].append(images.cpu())
+            outputs["logits"].append(components.observer.model(device_images).cpu())
+            outputs["labels"].append(labels.cpu())
+            outputs["indices"].append(indices.cpu())
+            seen += device_images.shape[0]
+            _maybe_report_progress(
+                progress_callback,
+                batch_idx=batch_idx,
+                total_batches=total_batches,
+                seen_images=seen,
+                target_images=max_images,
+            )
+            if max_images is not None and seen >= max_images:
+                break
+    return _concatenate_output_tensors(outputs, max_images=max_images)
+
+
 def collect_baseline_features(
     components: LoadedFlowComponents,
     loader,
