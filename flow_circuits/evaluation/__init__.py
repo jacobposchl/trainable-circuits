@@ -31,10 +31,18 @@ from flow_circuits.evaluation.interpretability_validation import (
     run_probe_confusion_analysis_experiment,
     run_probe_error_analysis_experiment,
 )
+from flow_circuits.evaluation.hard_pair_correction import (
+    NB06_EXPERIMENT_IDS,
+    run_hard_pair_case_study_experiment,
+    run_hard_pair_hybrid_correction_experiment,
+    run_hard_pair_probe_benchmark_experiment,
+    run_multiclass_z_probe_audit_experiment,
+)
 
 __all__ = [
     "BaselineComparison",
     "NB05_EXPERIMENT_IDS",
+    "NB06_EXPERIMENT_IDS",
     "CORE_MOTIF_EXPERIMENT_IDS",
     "ConfirmatoryCheck",
     "EXTENDED_MOTIF_EXPERIMENT_IDS",
@@ -60,4 +68,8 @@ __all__ = [
     "run_phase_motif_comparison_experiment",
     "run_probe_confusion_analysis_experiment",
     "run_probe_error_analysis_experiment",
+    "run_hard_pair_case_study_experiment",
+    "run_hard_pair_hybrid_correction_experiment",
+    "run_hard_pair_probe_benchmark_experiment",
+    "run_multiclass_z_probe_audit_experiment",
 ]

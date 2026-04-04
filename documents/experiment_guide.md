@@ -24,6 +24,8 @@ These stages map onto the current notebook suite:
 - `nb02_efficient_representation_and_circuit_validation.ipynb`
 - `nb03_recurring_motif_core_validation.ipynb`
 - `nb04_motif_extended_characterization.ipynb`
+- `nb05_motif_visual_interpretability_and_probe_analysis.ipynb`
+- `nb06_hard_pair_correction_from_z.ipynb`
 
 Each notebook is designed for Google Colab. The setup cell:
 
@@ -200,6 +202,24 @@ Use this notebook to:
 
 `nb04` requires cached motif-family artifacts from `nb03` and will error if they are missing.
 
+### Notebook 5: Motif Visual Interpretability and Probe Analysis
+
+Use this notebook to:
+
+- inspect motif and node-cluster exemplar grids directly on CIFAR-10 images
+- compare matched Phase B vs Phase C motifs visually
+- review intervention case studies
+- measure what class/error/confusion information is linearly decodable from `z`
+
+### Notebook 6: Hard-Pair Correction from z
+
+Use this notebook to:
+
+- audit multiclass linear decodability from `z`
+- benchmark full-`z` and top-node probes on the backbone's hardest validation-selected confusion pairs
+- test whether pairwise `z` probes improve the frozen backbone when used as top-2 tie-breakers
+- inspect corrected and harmed examples with top-node overlays
+
 ## Interpreting Outputs
 
 ### Confirmatory Analyses
@@ -231,7 +251,9 @@ Treat these as characterization, not gatekeeping:
 4. Run `nb02_efficient_representation_and_circuit_validation.ipynb`
 5. Run `nb03_recurring_motif_core_validation.ipynb`
 6. Run `nb04_motif_extended_characterization.ipynb` if you want the broader motif diagnostics
-7. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the aligned representation is promising
+7. Run `nb05_motif_visual_interpretability_and_probe_analysis.ipynb` to inspect motifs and probe-readable semantics directly
+8. Run `nb06_hard_pair_correction_from_z.ipynb` if you want to test whether `z` yields actionable correction signal for the backbone's hardest pairs
+9. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the aligned representation is promising
 
 ## Operational Notes
 
