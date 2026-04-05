@@ -80,7 +80,7 @@ def discover_motif_families(
             stage="data_collection",
             completed=event["batch_idx"],
             total=event.get("total_batches"),
-            message="collecting z/q motif features",
+            message="collecting z motif features",
         ),
     )
     result = _discover_motif_families_from_outputs(

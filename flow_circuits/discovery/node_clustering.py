@@ -98,15 +98,18 @@ def discover_node_clusters(
             members = np.flatnonzero(labels == cluster_id)
             if not (n_min <= members.size <= n_max):
                 continue
-            stability = bootstrap_cluster_stability(
-                prepared_descriptors,
-                members,
-                bootstrap_iterations=bootstrap_iterations,
-                rng=rng,
-                min_cluster_size=min_cluster_size,
-            )
-            if stability < stability_threshold:
-                continue
+            if int(bootstrap_iterations) <= 0 or float(stability_threshold) <= 0.0:
+                stability = 1.0
+            else:
+                stability = bootstrap_cluster_stability(
+                    prepared_descriptors,
+                    members,
+                    bootstrap_iterations=bootstrap_iterations,
+                    rng=rng,
+                    min_cluster_size=min_cluster_size,
+                )
+                if stability < stability_threshold:
+                    continue
             node_clusters.append(
                 {
                     "node": [int(layer_idx), int(cell_idx)],
