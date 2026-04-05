@@ -705,6 +705,7 @@ The first-class notebook suite mirrors these stages:
 - `notebooks/nb02_q_validation.ipynb`
 - `notebooks/nb03_z_motif_discovery_and_analysis.ipynb`
 - `notebooks/nb04_motif_utility_and_robustness.ipynb`
+- `notebooks/nb05_motif_semantic_interpretation.ipynb`
 
 The standard artifact flow is:
 

@@ -1,6 +1,6 @@
 # Experiment Guide
 
-This guide explains the current four-notebook workflow for training, validating, discovering, and testing `z`-space motif flows in `flow-circuits`.
+This guide explains the current five-notebook workflow for training, validating, discovering, testing, and interpreting `z`-space motif flows in `flow-circuits`.
 
 Related references:
 
@@ -24,6 +24,7 @@ But the canonical notebook story is now:
 - `nb02_q_validation.ipynb`
 - `nb03_z_motif_discovery_and_analysis.ipynb`
 - `nb04_motif_utility_and_robustness.ipynb`
+- `nb05_motif_semantic_interpretation.ipynb`
 
 Each notebook is Google Colab-first. The setup cell:
 
@@ -108,6 +109,16 @@ Notebook 4 writes:
 
 By default it transfers clean motifs to corrupted inputs before considering any corruption-specific rediscovery.
 
+### 5. Notebook 5 Interpretation Artifacts
+
+Notebook 5 writes:
+
+- branch-local semantic motif reports
+- borderline-member / near-miss summaries
+- spatial overlay and crop metadata
+
+These artifacts are meant for qualitative inspection rather than new statistical validation.
+
 ## Notebook Roles
 
 ### Notebook 1: Backbone and `z` Training
@@ -146,6 +157,16 @@ Use this notebook to:
 - evaluate clean hard-example utility
 - evaluate corruption robustness with transferred clean motifs
 
+### Notebook 5: Motif Semantic Interpretation
+
+Use this notebook to:
+
+- inspect the cached clean motifs from notebook 3 without rediscovering them
+- focus on the joint branch by default, with optional lightweight frozen reference context
+- render image-first motif cards with exemplars, borderline members, and near misses
+- inspect active-cell overlays and approximate crops
+- produce a cautious plain-English interpretation of what the motifs seem to encode
+
 ## Interpreting Outputs
 
 Primary success signals now come from three linked checks:
@@ -156,6 +177,8 @@ Primary success signals now come from three linked checks:
    - are the discovered `z` motifs stable, multi-layer, and interpretable?
 3. motif utility:
    - do those same motifs improve decisions on hard or corrupted inputs?
+4. motif meaning:
+   - do the top motifs look semantically coherent enough to inspect, describe, and reuse?
 
 The intended optimization target is not raw clean CIFAR-10 accuracy alone. The stronger target is:
 
@@ -169,7 +192,8 @@ The intended optimization target is not raw clean CIFAR-10 accuracy alone. The s
 2. Run `nb02_q_validation.ipynb`
 3. Run `nb03_z_motif_discovery_and_analysis.ipynb`
 4. Run `nb04_motif_utility_and_robustness.ipynb`
-5. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the chosen branch is promising
+5. Run `nb05_motif_semantic_interpretation.ipynb`
+6. Use the exhaustive `flow-discover` / `flow-intervene` CLI path only if the notebook suite indicates the chosen branch is promising
 
 ## Operational Notes
 

@@ -12,6 +12,7 @@ EXPECTED_NOTEBOOKS = {
     "nb02_q_validation.ipynb",
     "nb03_z_motif_discovery_and_analysis.ipynb",
     "nb04_motif_utility_and_robustness.ipynb",
+    "nb05_motif_semantic_interpretation.ipynb",
 }
 LEGACY_NOTEBOOKS = {
     "nb01_training_and_representation_metrics.ipynb",
@@ -35,7 +36,7 @@ def _iter_repo_text_files():
             yield path
 
 
-def test_repo_contains_only_four_notebook_suite():
+def test_repo_contains_only_five_notebook_suite():
     notebook_names = {path.name for path in NOTEBOOK_DIR.glob("*.ipynb")}
     assert notebook_names == EXPECTED_NOTEBOOKS
     assert not any((NOTEBOOK_DIR / name).exists() for name in LEGACY_NOTEBOOKS)
@@ -88,6 +89,16 @@ def test_notebooks_have_bootstrap_setup_config_and_compilable_code():
             "OUTPUT_DIR",
             "FORCE_RERUN",
         },
+        "nb05_motif_semantic_interpretation.ipynb": {
+            "PRIMARY_BRANCH",
+            "REFERENCE_BRANCH",
+            "TOP_MOTIFS_TO_RENDER",
+            "MOTIF_IDS",
+            "MAX_IMAGES",
+            "SHOW_REFERENCE_COMPARISON",
+            "OUTPUT_DIR",
+            "FORCE_RERUN",
+        },
     }
     for notebook_name in EXPECTED_NOTEBOOKS:
         data = json.loads((NOTEBOOK_DIR / notebook_name).read_text(encoding="utf-8"))
@@ -115,6 +126,7 @@ def test_notebook_api_contract_matches_new_workflow():
     nb02 = "\n".join("".join(cell["source"]) for cell in json.loads((NOTEBOOK_DIR / "nb02_q_validation.ipynb").read_text(encoding="utf-8"))["cells"] if cell["cell_type"] == "code")
     nb03 = "\n".join("".join(cell["source"]) for cell in json.loads((NOTEBOOK_DIR / "nb03_z_motif_discovery_and_analysis.ipynb").read_text(encoding="utf-8"))["cells"] if cell["cell_type"] == "code")
     nb04 = "\n".join("".join(cell["source"]) for cell in json.loads((NOTEBOOK_DIR / "nb04_motif_utility_and_robustness.ipynb").read_text(encoding="utf-8"))["cells"] if cell["cell_type"] == "code")
+    nb05 = "\n".join("".join(cell["source"]) for cell in json.loads((NOTEBOOK_DIR / "nb05_motif_semantic_interpretation.ipynb").read_text(encoding="utf-8"))["cells"] if cell["cell_type"] == "code")
 
     assert "run_backbone_and_z_training_workflow" in nb01
     assert "run_q_checkpoint_validation_experiment" in nb02
@@ -122,6 +134,11 @@ def test_notebook_api_contract_matches_new_workflow():
     assert "use_all_nodes=True" in nb03
     assert "run_motif_clean_utility_experiment" in nb04
     assert "run_motif_corruption_utility_experiment" in nb04
+    assert "run_motif_semantic_report_experiment" in nb05
+    assert "run_motif_spatial_footprint_experiment" in nb05
+    assert "run_motif_borderline_member_experiment" in nb05
+    assert "discover_motif_families" not in nb05
+    assert "run_q_checkpoint_validation_experiment" not in nb05
 
 
 def test_only_nb02_mentions_q_validation_api():

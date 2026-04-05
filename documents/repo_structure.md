@@ -52,6 +52,7 @@ This repository is organized around the `flow_circuits/` package and the current
 | `q_validation.py` | Candidate checkpoint ranking and downstream checkpoint selection using the only notebook-stage `q` validation pass. |
 | `motif_validation.py` | `z`-space motif-family discovery plus motif analyses used by the motif notebook workflow. |
 | `motif_utility.py` | Motif-based clean and corruption utility experiments used by the final notebook. |
+| `motif_interpretation.py` | Notebook-facing semantic motif cards, borderline-member summaries, and spatial footprint metadata for interpretability-first inspection. |
 
 ### `flow_circuits/interventions/`
 
@@ -110,6 +111,7 @@ The supported notebook suite is:
 - `nb02_q_validation.ipynb`
 - `nb03_z_motif_discovery_and_analysis.ipynb`
 - `nb04_motif_utility_and_robustness.ipynb`
+- `nb05_motif_semantic_interpretation.ipynb`
 
 Each notebook uses the current `flow_circuits` package and/or the `flow-*` CLIs only.
 

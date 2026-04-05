@@ -52,6 +52,16 @@ from flow_circuits.evaluation.motif_utility import (
     run_motif_clean_utility_experiment,
     run_motif_corruption_utility_experiment,
 )
+from flow_circuits.evaluation.motif_interpretation import (
+    CIFAR10_CLASS_NAMES,
+    MOTIF_BORDERLINE_MEMBER_ID,
+    MOTIF_INTERPRETATION_EXPERIMENT_IDS,
+    MOTIF_SEMANTIC_REPORT_ID,
+    MOTIF_SPATIAL_FOOTPRINT_ID,
+    run_motif_borderline_member_experiment,
+    run_motif_semantic_report_experiment,
+    run_motif_spatial_footprint_experiment,
+)
 from flow_circuits.evaluation.q_validation import (
     Q_VALIDATION_EXPERIMENT_ID,
     run_q_checkpoint_validation_experiment,
@@ -67,8 +77,13 @@ __all__ = [
     "EXTENDED_MOTIF_EXPERIMENT_IDS",
     "MOTIF_CLEAN_UTILITY_ID",
     "MOTIF_CORRUPTION_UTILITY_ID",
+    "MOTIF_BORDERLINE_MEMBER_ID",
+    "MOTIF_INTERPRETATION_EXPERIMENT_IDS",
+    "MOTIF_SEMANTIC_REPORT_ID",
+    "MOTIF_SPATIAL_FOOTPRINT_ID",
     "Q_VALIDATION_EXPERIMENT_ID",
     "RepresentationMetrics",
+    "CIFAR10_CLASS_NAMES",
     "bootstrap_mean_ci",
     "compute_alignment_scores",
     "discover_motif_families",
@@ -100,6 +115,9 @@ __all__ = [
     "run_corruption_sweep_experiment",
     "run_motif_clean_utility_experiment",
     "run_motif_corruption_utility_experiment",
+    "run_motif_borderline_member_experiment",
+    "run_motif_semantic_report_experiment",
+    "run_motif_spatial_footprint_experiment",
     "run_q_checkpoint_validation_experiment",
     "run_top_node_subset_sweep_experiment",
 ]

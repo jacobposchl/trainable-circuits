@@ -83,6 +83,7 @@ def run_motif_clean_utility_experiment(
         min_top_motifs=min_top_motifs,
         max_top_motifs=max_top_motifs,
         c_grid=c_grid,
+        tracker=tracker,
     )
     _maybe_write_json(result, output_path)
     return result
@@ -180,6 +181,7 @@ def run_motif_corruption_utility_experiment(
                 min_top_motifs=min_top_motifs,
                 max_top_motifs=max_top_motifs,
                 c_grid=c_grid,
+                tracker=tracker,
             )
             rows.append(
                 {
@@ -235,13 +237,35 @@ def _run_motif_utility_from_outputs(
     min_top_motifs: int,
     max_top_motifs: int,
     c_grid: tuple[float, ...],
+    tracker: _ProgressTracker | None = None,
 ) -> dict:
     ranked_motifs = _rank_motifs(motif_artifact.get("motifs", []))
     if not ranked_motifs:
         raise ValueError("Motif utility requires at least one retained motif.")
 
+    if tracker is not None:
+        tracker.emit(
+            stage="motif_feature_building",
+            completed=1,
+            total=4,
+            message="building fit motif activation features",
+        )
     fit_features = _motif_feature_matrix(ranked_motifs, fit_outputs["z"])
+    if tracker is not None:
+        tracker.emit(
+            stage="motif_feature_building",
+            completed=2,
+            total=4,
+            message="building validation motif activation features",
+        )
     val_features = _motif_feature_matrix(ranked_motifs, val_outputs["z"])
+    if tracker is not None:
+        tracker.emit(
+            stage="motif_feature_building",
+            completed=3,
+            total=4,
+            message="building test motif activation features",
+        )
     test_features = _motif_feature_matrix(ranked_motifs, test_outputs["z"])
 
     val_labels = val_outputs["labels"].numpy()
@@ -250,6 +274,14 @@ def _run_motif_utility_from_outputs(
     pair_counts = _top_confusion_pairs(val_labels, val_pred, top_pairs=int(top_pairs))
     if not pair_counts:
         raise ValueError("Motif utility requires at least one non-zero hard pair.")
+    if tracker is not None:
+        pair_names = ", ".join(f"{_label_name(left)} vs {_label_name(right)}" for left, right, _ in pair_counts)
+        tracker.emit(
+            stage="hard_pair_selection",
+            completed=len(pair_counts),
+            total=len(pair_counts),
+            message=f"selected hard pairs: {pair_names}",
+        )
 
     margin_cutoff = float(np.quantile(_top1_margin(val_probs), float(margin_quantile)))
     selected_top_indices = _select_top_motifs(
@@ -265,7 +297,15 @@ def _run_motif_utility_from_outputs(
         min_top_motifs=min_top_motifs,
         max_top_motifs=max_top_motifs,
         c_grid=c_grid,
+        tracker=tracker,
     )
+    if tracker is not None:
+        tracker.emit(
+            stage="motif_feature_building",
+            completed=4,
+            total=4,
+            message=f"selected {len(selected_top_indices)} top motifs for compact hybrid",
+        )
     pair_infos = _fit_pair_models(
         ranked_motifs=ranked_motifs,
         fit_features=fit_features,
@@ -277,6 +317,7 @@ def _run_motif_utility_from_outputs(
         pair_counts=pair_counts,
         selected_top_indices=selected_top_indices,
         c_grid=c_grid,
+        tracker=tracker,
     )
     evaluation = _evaluate_motif_hybrids(
         pair_infos=pair_infos,
@@ -285,6 +326,7 @@ def _run_motif_utility_from_outputs(
         test_features=test_features,
         trigger_mode=trigger_mode,
         margin_quantile=margin_quantile,
+        tracker=tracker,
     )
     return {
         "experiment": MOTIF_CLEAN_UTILITY_ID,
@@ -330,13 +372,15 @@ def _select_top_motifs(
     min_top_motifs: int,
     max_top_motifs: int,
     c_grid: tuple[float, ...],
+    tracker: _ProgressTracker | None = None,
 ) -> list[int]:
     val_probs = torch.softmax(val_outputs["logits"], dim=1).cpu().numpy()
     val_predictions = val_probs.argmax(axis=1)
     val_labels = val_outputs["labels"].numpy()
     top2_indices = np.argsort(val_probs, axis=1)[:, -2:][:, ::-1]
     motif_stats: list[dict] = []
-    for motif_idx, motif in enumerate(motifs):
+    for motif_idx, motif in enumerate(motifs, start=1):
+        motif_col = motif_idx - 1
         corrected = 0
         harmed = 0
         overrides = 0
@@ -347,9 +391,9 @@ def _select_top_motifs(
             fit_y = (fit_labels[fit_mask] == right_label).astype(np.int64)
             val_y = (val_labels[val_mask] == right_label).astype(np.int64)
             model = _fit_probe_model(
-                fit_features[fit_mask, motif_idx : motif_idx + 1],
+                fit_features[fit_mask, motif_col : motif_col + 1],
                 fit_y,
-                val_features[val_mask, motif_idx : motif_idx + 1],
+                val_features[val_mask, motif_col : motif_col + 1],
                 val_y,
                 c_grid=c_grid,
             )
@@ -359,7 +403,7 @@ def _select_top_motifs(
             if not np.any(pair_trigger):
                 continue
             pair_indices = np.nonzero(pair_trigger)[0]
-            pair_prob_right = _predict_binary_probabilities(model, val_features[pair_trigger, motif_idx : motif_idx + 1])
+            pair_prob_right = _predict_binary_probabilities(model, val_features[pair_trigger, motif_col : motif_col + 1])
             trigger_count += int(pair_trigger.sum())
             for local_idx, row_idx in enumerate(pair_indices.tolist()):
                 right_prob = float(pair_prob_right[local_idx])
@@ -374,7 +418,7 @@ def _select_top_motifs(
         precision = float(corrected / max(overrides, 1))
         motif_stats.append(
             {
-                "motif_idx": int(motif_idx),
+                "motif_idx": int(motif_col),
                 "net_gain": int(corrected - harmed),
                 "correction_precision": precision,
                 "stability": float(motif.get("stability", {}).get("mean_cluster_stability", 0.0)),
@@ -382,6 +426,13 @@ def _select_top_motifs(
                 "trigger_count": int(trigger_count),
             }
         )
+        if tracker is not None:
+            tracker.emit(
+                stage="top_motif_selection",
+                completed=motif_idx,
+                total=len(motifs),
+                message="scoring motifs by validation correction utility",
+            )
     requested = int(np.ceil(len(motifs) * float(top_motif_fraction)))
     top_k = max(int(min_top_motifs), min(int(max_top_motifs), max(1, requested)))
     top_k = min(top_k, len(motifs))
@@ -410,12 +461,13 @@ def _fit_pair_models(
     pair_counts: list[tuple[int, int, int]],
     selected_top_indices: list[int],
     c_grid: tuple[float, ...],
+    tracker: _ProgressTracker | None = None,
 ) -> list[dict]:
     fit_labels = fit_outputs["labels"].numpy()
     val_labels = val_outputs["labels"].numpy()
     test_labels = test_outputs["labels"].numpy()
     rows = []
-    for left_label, right_label, count in pair_counts:
+    for pair_idx, (left_label, right_label, count) in enumerate(pair_counts, start=1):
         fit_mask = np.isin(fit_labels, [left_label, right_label])
         val_mask = np.isin(val_labels, [left_label, right_label])
         test_mask = np.isin(test_labels, [left_label, right_label])
@@ -468,6 +520,13 @@ def _fit_pair_models(
                 },
             }
         )
+        if tracker is not None:
+            tracker.emit(
+                stage="pair_model_fitting",
+                completed=pair_idx,
+                total=len(pair_counts),
+                message=f"fitting motif probes for {_label_name(left_label)} vs {_label_name(right_label)}",
+            )
     return rows
 
 
@@ -479,6 +538,7 @@ def _evaluate_motif_hybrids(
     test_features: np.ndarray,
     trigger_mode: str,
     margin_quantile: float,
+    tracker: _ProgressTracker | None = None,
 ) -> dict:
     test_logits = test_outputs["logits"]
     test_probs = torch.softmax(test_logits, dim=1).cpu().numpy()
@@ -490,7 +550,7 @@ def _evaluate_motif_hybrids(
     test_margins = _top1_margin(test_probs)
 
     results = {}
-    for mode_name in ("full_motif", "top_motif"):
+    for mode_idx, mode_name in enumerate(("full_motif", "top_motif"), start=1):
         hybrid_probs = test_probs.copy()
         hybrid_preds = base_predictions.copy()
         trigger_mask = np.zeros(labels.shape[0], dtype=bool)
@@ -583,6 +643,13 @@ def _evaluate_motif_hybrids(
             per_pair_rows=per_pair_rows,
             pair_confidences=pair_confidences,
         )
+        if tracker is not None:
+            tracker.emit(
+                stage="hybrid_evaluation",
+                completed=mode_idx,
+                total=2,
+                message=f"evaluated {mode_name.replace('_', ' ')} hybrid on held-out data",
+            )
     backbone_per_pair_rows = [
         {
             "left_label": row["summary"]["left_label"],

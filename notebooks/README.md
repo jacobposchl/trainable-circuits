@@ -8,6 +8,7 @@ The notebooks in this repo are analysis and orchestration surfaces, not the prim
 - `nb02_q_validation.ipynb`
 - `nb03_z_motif_discovery_and_analysis.ipynb`
 - `nb04_motif_utility_and_robustness.ipynb`
+- `nb05_motif_semantic_interpretation.ipynb`
 
 ## Intended Role
 
@@ -25,6 +26,7 @@ Current notebook roles:
 - `nb02`: the only `q` notebook; ranks frozen and joint checkpoints and selects the downstream pair
 - `nb03`: `z`-only motif discovery and motif-family analysis on clean data
 - `nb04`: motif-based prediction utility on clean hard examples and corrupted inputs
+- `nb05`: image-first semantic inspection of cached motifs, focused on what the motifs appear to represent
 
 Each notebook should not:
 
